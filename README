@@ -1,0 +1,33 @@
+Introduction
+============
+
+nprobe is a software NetFlow v5/v9/IPFIX and nFlow probe that allows to turn a PC into a NetFlow probe.
+It has been designed to be compact, easy to embed, an memory/CPU savvy.
+
+
+Build Steps
+===========
+./autogen.sh
+make
+sudo make install
+
+
+NetFlow v5
+==========
+This is the default flow export format.
+
+
+NetFlow v9
+==========
+In order to enable NetFlowV9 it is necessary to use the -T flag that defines the template format. For instance:
+'nprobe -V 9 -T "%PKTS %BYTES %TOS %IP_SRC_ADDR %IP_DST_ADDR"  -n 127.0.0.1:2055'. For the list of all supported
+fields type "nprobe -h". You can visualize the generated flows using a recent version of Ethereal (www.ethereal.com).
+
+
+IPFIX
+========
+In order to enable IPFIX it is necessary to specify -T (as for NetFlowV9) and -V 10.
+
+=======================================
+
+Copyright (C) 2002-2010 - Luca Deri <deri@ntop.org>

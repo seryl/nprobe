@@ -1,0 +1,242 @@
+                     __ _
+                    / _| |__   __ _ _   _  ___ _ __ _   _
+                   | |_| '_ \ / _` | | | |/ _ \ '__| | | |
+                   |  _| |_) | (_| | |_| |  __/ |  | |_| |
+                   |_| |_.__/ \__, |\__,_|\___|_|   \__, |
+                                 |_|                |___/
+
+                              Copyright (C) 2009-10
+                            Luca Deri <deri@ntop.org>
+                     Valeria Lorenzetti <lorenzetti@ntop.org>
+
+                             http://www.ntop.org/
+
+ -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+ Usage: fbquery [-c <columns>] -d <directory> [-q <query-conditions>]
+                [-o <orderby-columns>] [-r] [-g <groupby-columns>] [-m <metadata-file>]
+                [-D] [-L <i[,j]>] [-S <separator>] [-H] [-N] [-V] [-Q]
+
+ Info:
+  [--help|-h]                 | Show this help message and exit
+  [--version|-v]              | Show fbquery version number and exit
+
+ Options:
+  [--columns|-c <columns>]    | List of column names to select, separated by comma. Can be specified
+                              | also the one-argument functions: MIN(), MAX(), SUM() and AVG().
+  --directory|-d <directory>  | Pathname of directory containing a Fastbit partition on which execute
+                              | the query. Multiple directories can be defined using multiple -d flags.
+  [--query|-q <conditions>]   | Specifies the conditions of the query with a set of range conditions
+                              | joined together with logical operators. The supported logical operators
+                              | are: AND, OR, XOR, NOT. The range condition can be defined with the
+                              | operators: <, <=, >, and >=, IN and BETWEEN.
+  [--orderby|-o <columns>]    | Sort values in ascending order in according to columns specified
+  [--reverse|-r]              | Sort values in descending order in according to columns specified in the
+                              | ORDER BY clause (or in the SELECT clause if no ORDER BY clause is  specified)
+  [--groupby|-g <columns>]    | Used along with the aggregate functions like SUM to provide means of
+                              | grouping the result by certain columns
+  [--metadata-file|-m <file>] | Pathname of the metadata file that has been dumped by nProbe (This file
+                              | allows to fbquery to print results with a customized format)
+  [--distinct|-D]             | Retrieves only unique rows from the result set
+  [--limit|-L <i[,j]>]        | Limit query results to those that fall within a specified range. Can be
+                              | used to show the first 'i' number of results, or to show a range using
+                              | <i,j>, where 'i' is the starting point (the first record is 0) and 'j'
+                              | is the duration (how many records to display)
+  [--separator|-S <sep>]      | Character to be used as CSV separator between columns of results
+  [--hide-header|-H]          | Hide the header line that contains the column names
+  [--native-format|-N]        | Print each selected column with its native format
+
+ Verboseness:
+  [--verbose|-V]              | Increase the verboseness of fbquery functions
+  [--quiet|-Q]                | Disable the verboseness of FastBit functions
+
+
+ -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+ The queries accepted by fbquery are specified in a much simplified
+ SQL format. A query is basically a SQL SELECT statements where can
+ be specified:
+
+   * a SELECT clause using the fbquery optional parameter "-c"
+   * a FROM clause using the fbquery mandatory parameter "-d"
+   * a WHERE clause using the fbquery mandatory parameter "-q"
+
+ According to the SQL standard, all the keywords, the operators and
+ the function names described below are not case sensitive. Likewise,
+ all the the names of the columns are not case sensitive.
+
+ Moreover, the blank spaces around parameters, operators or
+ column names are ignored.
+
+ ----------------------------------------------------------
+ The fbquery syntax is logically equivalent to a SQL statement.
+
+ A simple SQL query like this:
+
+  SELECT IPV4_SRC_ADDR FROM database WHERE L4_DST_PORT=80
+
+ can be submitted to fbquery using this syntax:
+
+  fbquery -c "IPV4_SRC_ADDR" -d "database" -q "L4_DST_PORT=80"
+ ----------------------------------------------------------
+
+ In the following we discuss the requirements and the restrictions on
+ these three clauses.
+
+
+ SELECT CLAUSE
+ =============
+
+ The SELECT clause can be specified using the fbquery parameter "-c".
+
+ The clause contains a list of column names separated by comma (,) and any
+ of the four one-argument functions such as MIN(), MAX(), SUM() and AVG().
+
+ Each of the four functions can take only one column name as its argument
+ and blank spaces are not allowed between the brackets and the name of the
+ column itself. The syntax of aggregate functions is:
+
+  MAX(<column_name>)
+  MIN(<column_name>)
+  SUM(<column_name>)
+  AVG(<column_name>)
+
+ To retrieve only the distinct rows from the result set can be specified
+ the flag "-D"
+
+ ----------------------------------------------------------
+ Example of SELECT clause with only one column name:
+ > fbquery -c "IPV4_SRC_ADDR" -d "database" -q "L4_SRC_PORT=80"
+
+ Example of SELECT clause with two columns names:
+ > fbquery -c "IPV4_SRC_ADDR,IPV4_DST_ADDR" -d "database" -q "L4_SRC_PORT=80"
+
+ Examples of SELECT clause with aggregate operations and columns names:
+ > fbquery -c "MAX(L4_DST_PORT)" -d "database" -q "L4_SRC_PORT=80"
+ > fbquery -c "MIN(L4_DST_PORT)" -d "database" -q "L4_SRC_PORT=80"
+ > fbquery -c "SUM(OUT_BYTES)" -d "database" -q "IPV4_SRC_ADDR=12.120.60.90"
+ > fbquery -c "SUM(OUT_BYTES),IPV4_SRC_ADDR" -d "database" -q "L4_SRC_PORT=80"
+
+ Example of SELECT with COUNT(*)
+ > fbquery -c IPV4_SRC_ADDR,COUNT(*)" -d "database" -q "IPV4_SRC_ADDR>=0"
+
+ ----------------------------------------------------------
+
+ If a SELECT clause is omitted, it is assumed to be "SELECT COUNT(*)",
+ and the query purpose is to count the number of hits.
+
+ ----------------------------------------------------------
+ Example of output with no SELECT clause:
+ > fbquery -d "database" -q "L4_SRC_PORT=80"
+ > [fbquery] Query produced 2 hits, took 0 CPU seconds, 0.00194 elapsed seconds
+ ----------------------------------------------------------
+
+
+ FROM CLAUSE
+ ===========
+
+ The FROM clause is mandatory and it can be specified using the fbquery
+ parameter "-d".
+
+ The clause contains the pathname of directory containing a Fastbit
+ partition on which execute the query. Multiple directories can be defined
+ using multiple "-d" flags.
+
+ ----------------------------------------------------------
+ Example of FROM clause with multiple directories
+ > fbquery -c "IPV4_SRC_ADDR" -d "database1/" -d "database2/" -q "L4_SRC_PORT=80"
+ ----------------------------------------------------------
+
+
+ WHERE CLAUSE
+ ============
+
+ The WHERE clause can be specified using the fbquery parameter "-q".
+
+ The WHERE clause specifies the conditions of the query with a set of range
+ conditions joined together with logical operators.
+
+ The supported logical operators are: AND, OR, XOR, NOT.
+
+ The supported range conditions can be subdivided into:
+  * equality conditions
+  * discrete ranges
+  * one-sided and two-sided range conditions.
+
+ An equality condition is defined by the equal operator "=" and its two
+ operands can be arithmetic expressions, column names, numbers or
+ string literals.
+
+ A discrete range is defined by the operator "IN". The syntax is:
+ "<column_name> IN (A,B,..,Z)" where A, B, and Z can be a list of strings
+ or numbers comma separated. The statement "A IN (B,C)" is equivalent to
+ "A = B OR A = C".
+
+ A range condition can be one-sided as "A > 10", or two-sided as "10 <= A < 20."
+ It can be defined with operators selected from: <, <=, >, and >=. The operands
+ of the operator can be any arithmetic expressions, column names or numbers.
+
+ Alternatively, a two-side range can be defined with operators "BETWEEN-AND",
+ where: "A BETWEEN B AND C" is equivalent to "B <= A <= C". The operands
+ A, B, and C can be any arithmetic expression, column name or number.
+
+ An arithmetic expression may contain operators +, -, *, /, %, ^ (the operator
+ ^ denote the exponential operation). All one-argument and two-argument arithmetic
+ functions available in math.h are supported.
+
+ ----------------------------------------------------------
+ Example of WHERE clause with equality condition:
+ > fbquery -c "L4_SRC_PORT" -d "database" -q "L4_SRC_PORT=80"
+
+ Example of WHERE clause with logical operator:
+ > fbquery -c "IPV4_SRC_ADDR,L4_SRC_PORT" -d "database" -q "NOT L4_SRC_PORT=22"
+
+ Example of WHERE clause with one-side range condition and logical operator:
+ > fbquery -c "L4_DST_PORT" -d "database" -q "IPV4_SRC_ADDR=74.125.77.104 AND L4_SRC_PORT=80"
+
+ Example of WHERE clause with operator IN:
+ > fbquery -c "L4_DST_PORT" -d "database" -q "L4_SRC_PORT IN (22,25,80)"
+
+ Example of WHERE clause with operator BETWEEN-AND:
+ > fbquery -c "L4_SRC_PORT" -d "database" -q "L4_SRC_PORT BETWEEN 25 AND 80"
+
+ Example of WHERE clause with a IPv4 in dotted decimal notation
+ > fbquery -c "IPV4_SRC_ADDR,IPV4_DST_ADDR" -d "database" -q "IPV4_SRC_ADDR = 10.0.0.1"
+
+ Example of WHERE clause with a IPv4 with subnet mask specified
+ > fbquery -c "IPV4_SRC_ADDR,IPV4_DST_ADDR" -d "database" -q "IPV4_SRC_ADDR = 10.0.0.1/24"
+ ----------------------------------------------------------
+
+
+ -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+ METADATA
+ ========
+ To suitably format the results (like an IPv4 in dot-notation) can be used the
+ parameter "-m" followed by the pathname of the metadata file dumped by nProbe.
+ This file can be obtained from nProbe with the parameter "--dump-metadata <file>"
+ and can be customized.
+
+ > fbquery -c "L4_SRC_PORT,IPV4_SRC_ADDR" -d "database" -q "L4_SRC_PORT=80" -m metadata
+
+
+ LIMIT
+ =====
+ LIMIT is used to reduce query results to those that fall within a specified range.
+ Can be used to show the first 'i' number of results, or to show a range using <i,j>,
+ where 'i' is the starting point (the first record is 0) and 'j' is the duration (how many
+ records to display).
+ LIMIT syntax is: "-L <i[,j]>"
+
+ > fbquery -c "L4_SRC_PORT,L4_DST_PORT" -d "database" -q "L4_DST_PORT=100" -L 10
+
+
+ ORDER BY
+ ========
+ ORDER BY can be specified with "-o" parameter followed by a list of column names
+ comma separated. It is used to sort values in ascending order in according to columns
+ specified with "-o" flag. By default, the results are sorted in ASCENDING order.
+ To sort the records in a DESCENDING order, can be added the "-r" flag.
+
+ > fbquery -c "L4_SRC_PORT,L4_DST_PORT" -d "database" -q "L4_DST_PORT>0" -o "L4_DST_PORT"
+ > fbquery -c "L4_SRC_PORT,L4_DST_PORT" -d "database" -q "L4_DST_PORT>0" -o "L4_DST_PORT" -r

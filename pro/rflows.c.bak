@@ -1,0 +1,95 @@
+/*
+ *  Copyright (C) 2006-08 Luca Deri <deri@ntop.org>
+ *
+ *  			  http://www.ntop.org/
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ */
+
+#include "nprobe.h"
+
+/* **************************************** */
+
+void processRflowsPacket(char *packet, u_int packet_len, u_int32_t sender_ip) {
+  RflowsHeader *header;
+  RflowsPacketRecord_v1 *record;
+  int i;
+  struct ether_header ehdr;
+  struct pcap_pkthdr h;
+
+  traceEvent(TRACE_INFO, "Handling rflows packet record [len=%d]", packet_len);
+
+  if(packet_len < sizeof(RflowsHeader)) {
+    traceEvent(TRACE_INFO, "Rflows packet too short (%d bytes)", packet_len);
+    return; /* too short */
+  } else
+    header = (RflowsHeader*)packet;
+
+  if(header->version != 1) {
+    traceEvent(TRACE_INFO, "Bad rflows packet version");
+    return; /* bad version */
+  }
+
+  if(((header->num_records * RFLOWSPACKETRECORD_V1_LEN) + sizeof(RflowsHeader)) > packet_len) {
+    traceEvent(TRACE_INFO, "Rflows packet too short [%d bytes][expected %d bytes][%d records]",
+	       packet_len,
+	       ((header->num_records * RFLOWSPACKETRECORD_V1_LEN) + sizeof(RflowsHeader)),
+	       header->num_records);
+    return; /* too short */
+  } else
+    traceEvent(TRACE_INFO, "Received rflows packet has %d records", header->num_records);
+
+  h.ts.tv_sec = ntohl(header->timestamp);
+
+  memset(&ehdr, 0, sizeof(ehdr));
+
+  for(i=0; i<header->num_records; i++) {
+    IpAddress src, dst;
+    struct in_addr addr;
+
+    record = (RflowsPacketRecord_v1*)(&packet[sizeof(RflowsHeader) + (i*RFLOWSPACKETRECORD_V1_LEN)]);
+    traceEvent(TRACE_INFO, "Handling rflows packet record %d", i);
+
+    src.ipVersion = 4, dst.ipVersion = 4;
+
+    addr.s_addr = record->src_ip;
+    if(readOnlyGlobals.ignoreIP || (!isLocalAddress(&addr)))
+      src.ipType.ipv4 = 0; /* 0.0.0.0 */
+    else
+      src.ipType.ipv4 = ntohl(record->src_ip);
+
+    addr.s_addr = record->src_ip;
+    if(readOnlyGlobals.ignoreIP || (!isLocalAddress(&addr)))
+      dst.ipType.ipv4 = 0; /* 0.0.0.0 */
+    else
+      dst.ipType.ipv4 = ntohl(record->dst_ip);
+
+    h.ts.tv_usec = ntohl(record->timestamp)/1000;
+    addPktToHash(record->ip_proto, 0, 1,
+		 readOnlyGlobals.ignoreTos ? 0 : record->ip_tos, 0, 0, &ehdr,
+		 src, ntohs(record->src_port),
+		 dst, ntohs(record->dst_port),
+		 ntohs(record->packet_len),
+		 record->tcp_flags, 0, 0,
+		 0, NULL,
+		 NO_INTERFACE_INDEX, NO_INTERFACE_INDEX,
+		 NULL,
+		 &h, NULL,
+		 0, 0, 0,
+		 0, 0,
+		 0, 0, sender_ip);
+  }
+}
+

@@ -1,0 +1,82 @@
+#
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# local automake definitions for ntop
+## (this file is processed with 'automake' to produce Makefile.in)
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+#
+# Copyright (c) 1998, 2000 Luca Deri <deri@ntop.org>
+# Updated 1Q 2000 Rocco Carbone <rocco@ntop.org>
+#
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+#
+
+dnl>
+dnl>  Check for an ANSI C typedef in a header
+dnl>
+dnl>  configure.in:
+dnl>    AC_CHECK_TYPEDEF(<typedef>, <header>)
+dnl>  acconfig.h:
+dnl>    #undef HAVE_<typedef>
+dnl>
+
+AC_DEFUN([AC_CHECK_TYPEDEF],[dnl
+AC_REQUIRE([AC_HEADER_STDC])dnl
+AC_MSG_CHECKING(for typedef $1)
+AC_CACHE_VAL(ac_cv_typedef_$1,
+[AC_EGREP_CPP(dnl
+changequote(<<,>>)dnl
+<<(^|[^a-zA-Z_0-9])$1[^a-zA-Z_0-9]>>dnl
+changequote([,]), [
+#include <$2>
+], ac_cv_typedef_$1=yes, ac_cv_typedef_$1=no)])dnl
+AC_MSG_RESULT($ac_cv_typedef_$1)
+if test $ac_cv_typedef_$1 = yes; then
+    AC_DEFINE(HAVE_[]translit($1, [a-z], [A-Z]))
+fi
+])
+
+
+dnl>
+dnl>  Check whether compiler option works
+dnl>
+dnl>  configure.in:
+dnl>    AC_COMPILER_OPTION(<name>, <display>, <option>,
+dnl>                       <action-success>, <action-failure>)
+dnl>
+
+AC_DEFUN([AC_COMPILER_OPTION],[dnl
+AC_MSG_CHECKING(for compiler option $2)
+AC_CACHE_VAL(ac_cv_compiler_option_$1,[
+cat >conftest.$ac_ext <<EOF
+int main() { return 0; }
+EOF
+${CC-cc} -c $CFLAGS $CPPFLAGS $3 conftest.$ac_ext 1>conftest.out 2>conftest.err
+if test $? -ne 0 -o -s conftest.err; then
+     ac_cv_compiler_option_$1=no
+else
+     ac_cv_compiler_option_$1=yes
+fi
+rm -f conftest.$ac_ext conftest.out conftest.err
+])dnl
+if test ".$ac_cv_compiler_option_$1" = .yes; then
+    ifelse([$4], , :, [$4])
+else
+    ifelse([$5], , :, [$5])
+fi
+AC_MSG_RESULT([$ac_cv_compiler_option_$1])
+])dnl
+

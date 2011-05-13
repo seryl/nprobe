@@ -1,0 +1,698 @@
+dnl>
+dnl> Copyright (c) 2002-11 Luca Deri <deri@ntop.org>
+dnl>
+
+
+dnl>
+dnl> standard Autoconf prolog
+dnl>
+AC_INIT([nprobe],[6.1.6])
+AC_PREREQ(2.52)
+AC_REVISION([1.0])
+
+
+AC_CONFIG_MACRO_DIR([m4])
+dnl> acconfig.h is deprecated
+dnl> AH_TEMPLATE([ DEBUG ], [ Define if you want a debugging version.])
+
+
+echo
+echo "Welcome to $PACKAGE_NAME, Version $PACKAGE_VERSION"
+echo "Copyright (C) 2002-11 Luca Deri <deri@ntop.org>"
+echo
+
+THE_UID=`id -u`
+if test $THE_UID -eq 0; then
+   echo "################## WARNING ##################"
+   echo
+   echo "Running configure and compiling as root might lead"
+   echo "to compilation issues."
+   echo
+   echo "Please run configure as normal user, not as superuser"
+   echo
+   echo "#############################################"
+fi
+
+dnl>
+dnl> canonicalize the host, target, and build system types
+dnl>
+\rm -f libtool
+AC_CANONICAL_SYSTEM
+AM_PROG_LIBTOOL
+
+dnl We need to do this before checking types
+AC_CHECK_HEADERS([sys/types.h])
+
+AC_CHECK_TYPE(u_int64_t, unsigned long long)
+AC_CHECK_TYPE(u_int32_t, unsigned long)
+AC_CHECK_TYPE(u_int16_t, unsigned short)
+AC_CHECK_TYPE(u_int8_t, unsigned char)
+AC_CHECK_TYPE(int64_t, long long)
+AC_CHECK_TYPE(int32_t, long)
+AC_CHECK_TYPE(int16_t, short)
+AC_CHECK_TYPE(int8_t, char)
+
+dnl>
+dnl> perform program name transformation
+dnl>
+AC_ARG_PROGRAM
+
+AC_ARG_WITH(only-ipv4,
+              [  --with-only-ipv4	  Disable IPv6 support (if available)], [
+	          if test $withval != no
+	          then
+		        CFLAGS="-DIPV4_ONLY $CFLAGS"
+	          fi
+              ],)
+
+AC_ARG_WITH(  pcap-root,
+              [  --with-pcap-root=DIR    LBNL pcap located in DIR],
+              PCAP_ROOT="$withval",
+              PCAP_ROOT=)
+AC_ARG_WITH(static-nprobe,
+              [  --with-static-nprobe    Build static nprobe (make nprobes)],
+              CFLAGS="-DMAKE_STATIC_PLUGINS $CFLAGS",)
+AC_ARG_WITH(license,
+              [  --with-license          Build with license check],
+              LICENSE="1",)
+
+dnl> AM_DISABLE_SHARED
+dnl> AM_ENABLE_SHARED
+dnl> AM_PROG_LIBTOOL
+
+dnl> set default loader
+CCLD=$CC
+
+AM_PROG_CC_STDC
+AM_PROG_CC_C_O
+
+dnl> AC_PROG_CPP
+AC_PROG_CXX(g++)
+AC_SET_MAKE
+AC_PROG_INSTALL
+
+dnl>
+dnl> set reasonable defaults here
+dnl>
+DEFS="-DHAVE_CONFIG_H"
+CFLAGS="-g $CFLAGS"
+INCS=""
+
+dnl Test endianness
+AC_TRY_RUN([
+
+int main()
+{
+        short s = 1;
+        short* ptr = &s;
+        unsigned char c = *((char*)ptr);
+        return c;
+}
+
+]
+, [ AC_DEFINE(NPROBE_BIG_ENDIAN, 1, [build for big endian]) ]
+, [ AC_DEFINE(NPROBE_LITTLE_ENDIAN, 1, [build for little endian]) ]
+, [ AC_DEFINE(NPROBE_BIG_ENDIAN, 1, [build for big endian]) ]
+)
+
+dnl>
+dnl> force configure to use current directory
+dnl>
+AC_CONFIG_AUX_DIR(.)
+
+AM_INIT_AUTOMAKE($PACKAGE,$VERSION)
+
+dnl>
+dnl> make NPROBEDIR the default for the installation
+dnl>
+AC_PREFIX_DEFAULT(${NPROBEDIR:-/usr/local})
+
+dnl> Add /usr/local/ /opt/local
+CFLAGS="${CFLAGS} -I/usr/local/include -I/opt/local/include"
+CPPFLAGS="${CPPFLAGS} -I/usr/local/include -I/opt/local/include"
+LDFLAGS="${LDFLAGS} -L/usr/local/lib -L/opt/local/lib"
+
+
+dnl>
+dnl> generate the config header
+dnl>
+umask 002
+AM_CONFIG_HEADER(config.h)
+
+REV=tac
+DYN_FLAGS=
+MORESOURCES=
+MOREOBJECTS=
+SO_VERSION_PATCH=
+dnl>MAKE_SHARED_LIBRARY_PARM=""
+MAKE_SHARED_LIBRARY_PARM=" -bundle -flat_namespace -undefined suppress"
+
+LIBTOOL_PATH="/usr/bin/libtool"
+if ! test -x ${LIBTOOL_PATH}; then
+LIBTOOL_PATH=`which libtool`
+fi
+
+IS_FREEBSD=
+
+case "$host:$CC" in
+    *-solaris* )
+        AC_DEFINE(NEED_INET_ATON, 1, [inet_aton])
+	CFLAGS="-DSOLARIS $CFLAGS"
+        CORELIBS="${CORELIBS} -lrt -lnsl"
+        ;;
+
+   *-*-freebsd*:* )
+       CFLAGS="-DFREEBSD $CFLAGS"
+       IS_FREEBSD=1
+      ;;
+
+    *darwin* )
+        CFLAGS="-no-cpp-precomp -DDARWIN $CFLAGS"
+	REV="tail -r"
+	DYN_FLAGS="-bundle -flat_namespace -undefined suppress $DYN_FLAGS"
+	KERNEL_VERSION=`uname -r | cut -d '.' -f 1`
+#	echo $KERNEL_VERSION
+        if test $KERNEL_VERSION -gt 9; then
+	  CFLAGS="-DSNOW_LEOPARD $CFLAGS"
+	fi
+	LIBTOOL_PATH=`which glibtool`
+        ;;
+     *linux* )
+        if test "$LICENSE" != ""; then
+         MORELIBS="${MORELIBS} -L`pwd`/private/dmidecode-2.9 -llicense"
+	 AC_DEFINE(HAVE_LICENSE, 1, [Check nprobe license])
+	fi
+        ;;
+esac
+
+dnl>
+dnl> checks for system header files
+dnl>
+
+AC_HEADER_STDC
+dnl> AC_HEADER_TIME
+
+AC_CHECK_HEADERS(dlfcn.h dl.h)
+AC_CHECK_HEADERS([dirent.h])
+if test ".${ac_cv_header_dlfcn_h}" != ".yes"; then
+    echo "Unable to find dlfcn.h"
+    echo ""
+    echo "You cannot use dlopen load plugins."
+    echo "Build nprobe without plugin support or with dynamic plugins."
+fi
+
+dnl> MANDATORY general purpose headers
+AC_HAVE_HEADERS(pwd.h stdio.h errno.h stdlib.h unistd.h string.h signal.h fcntl.h dnl
+		sys/time.h sys/wait.h sys/stat.h sys/ioctl sys/un.h)
+
+dnl> OPTIONAL general purpose headers
+AC_CHECK_HEADERS(sys/select.h sys/ldr.h sys/sockio.h)
+
+AC_CHECK_LIB([c], [optreset], AC_DEFINE_UNQUOTED(HAVE_OPTRESET, 1, [libc has optreset]))
+
+AC_CHECK_HEADERS(sched.h sys/sched.h semaphore.h pthread.h)
+AC_CHECK_LIB(pthread, pthread_create)
+
+dnl> R/W locks are broken on some BSD releases
+if test "$IS_FREEBSD" != "1"; then
+AC_MSG_CHECKING([if r/w locks are supported])
+AC_TRY_RUN([
+#include <pthread.h>
+
+int main()
+{
+        pthread_rwlock_t t;
+        return 0;
+}
+
+]
+, [ AC_MSG_RESULT(yes) AC_DEFINE_UNQUOTED(HAVE_RW_LOCK, 1, [pthread has rw locks]) ], [AC_MSG_RESULT(no)]
+)
+fi
+
+AC_CHECK_LIB(dl, dlopen)
+
+dnl> MANDATORY universal headers for network programming code
+AC_HAVE_HEADERS(sys/socket.h netdb.h netinet/in.h arpa/inet.h net/if.h)
+AC_HAVE_HEADERS(netinet/in_systm.h netinet/ip.h netinet/ip_icmp.h netinet/udp.h netinet/tcp.h)
+
+dnl> OPTIONAL headers for network programming headers
+AC_CHECK_HEADERS(netinet/if_ether.h arpa/nameser.h net/ethernet.h ethertype.h if.h net/bpf.h)
+
+dnl> OPTIONAL syslog headers
+AC_CHECK_HEADERS(sys/syslog.h, [ac_sys_syslog_h="yes"], [ac_sys_syslog_h="no"])
+AC_CHECK_HEADERS(syslog.h, [ac_syslog_h="yes"], [ac_syslog_h="no"])
+
+dnl>
+dnl> Test ether_header has ea
+dnl>
+AC_MSG_CHECKING([if ether_header uses ether_addr structs])
+AC_TRY_COMPILE([
+#       include <sys/types.h>
+#       if __STDC__
+        /* osf3 has REALLY good prototyes */
+        struct mbuf;
+        struct rtentry;
+#       endif
+#       include <sys/socket.h>
+#       include <net/if.h>
+#       include <netinet/in.h>
+#       include <netinet/if_ether.h>],
+    [u_int i =
+         sizeof(((struct ether_header *)0)->ether_dhost.ether_addr_octet)],
+    [AC_MSG_RESULT(yes)
+     AC_DEFINE_UNQUOTED(ETHER_HEADER_HAS_EA,
+                        1,
+                        [ether_header uses ether_addr structs])],
+    [AC_MSG_RESULT(no)])
+
+
+dnl> Networking libraries
+dnl>
+AC_CHECK_LIB(socket, accept)
+AC_CHECK_LIB(resolv, inet_aton)
+
+dnl> SCTP - RFC 3286
+dnl>
+AC_MSG_CHECKING([sctp])
+AC_TRY_LINK([
+        #include "confdefs.h"
+        #include <netinet/in.h>
+        #include <netinet/sctp.h>
+        #include <sys/socket.h>],
+        [socket(AF_INET, SOCK_SEQPACKET, IPPROTO_SCTP);],
+        AC_DEFINE_UNQUOTED(HAVE_SCTP, 1, [SCTP is supported])
+AC_MSG_RESULT(yes)
+ac_has_sctp=yes,
+AC_MSG_RESULT(no)
+ac_has_sctp=no)
+
+PWD=`pwd`/..
+LIBPCAP_ARM="${PWD}/libpcap-1.0.0-ARM"
+PLATFORM=`uname -m`
+
+if test -d ${LIBPCAP_ARM}; then
+echo "Found ${LIBPCAP_ARM}: we'll be building nProbe for the ARM platform."
+AC_DEFINE_UNQUOTED(HAVE_ARM, 1, [ARM is supported])
+INCS="${INCS} -I ${LIBPCAP_ARM}"
+CORELIBS="${CORELIBS} ${LIBPCAP_ARM}/libpcap.a"
+CC="arm-mv5sft-linux-gnueabi-gcc"
+CPP=${CC}
+LTGCC=${CC}
+LTCC=${CC}
+CCLD=${CC}
+LD=${CC}
+PLATFORM=arm
+AC_DEFINE_UNQUOTED(HAVE_PCAP_NEXT_EX, 1, [pcap has pcap_next_ex])
+HAVE_ARM=1
+dnl> ARM
+
+if test -f "${PWD}/PF_RING/userland/lib/libpfring.a"; then
+if test -f "pro/pf_ring.h"; then
+AC_DEFINE_UNQUOTED(HAVE_PF_RING, 1, [Native PF_RING support])
+AC_DEFINE_UNQUOTED(HAVE_PCAP_NEXT_EX, 1, [pcap has pcap_next_ex])
+INCS="${INCS} -I /lib/modules/`uname -r`/source/include"
+PFRING=pro/pfring.c
+
+if test -d "${PWD}/PF_RING/"; then
+  INCS="${INCS} -I ${PWD}/PF_RING/userland/lib -I ${PWD}/PF_RING/kernel"
+  CORELIBS="${CORELIBS} -lpfring"
+fi
+
+fi
+fi
+
+dnl> !ARM
+else
+
+
+dnl>
+dnl> PF_RING
+dnl>
+AC_MSG_CHECKING([Native PF_RING support])
+if test -f "/usr/local/include/pfring.h"; then
+if test -f "/usr/local/lib/libpfring.a"; then
+if test -f "pro/pf_ring.h"; then
+AC_DEFINE_UNQUOTED(HAVE_PF_RING, 1, [Native PF_RING support])
+dnl> We suppose to use PF_RING's version of libpcap
+AC_DEFINE_UNQUOTED(HAVE_PCAP_NEXT_EX, 1, [pcap has pcap_next_ex])
+AC_MSG_RESULT(yes)
+INCS="${INCS} -I /lib/modules/`uname -r`/source/include"
+PFRING=pro/pfring.c
+
+if test -d "${HOME}/PF_RING/"; then
+  INCS="${INCS} -I ${HOME}/PF_RING/userland/lib -I ${HOME}/PF_RING/kernel"
+  CORELIBS="${CORELIBS} ${HOME}/PF_RING/userland/libpcap-1.0.0-ring/libpcap.a -lpfring"
+fi
+
+else
+AC_MSG_RESULT(no [missing "pro/pf_ring.h"])
+fi
+else
+AC_MSG_RESULT(no [missing "/usr/local/lib/libpfring.a"])
+fi
+else
+AC_MSG_RESULT(no [missing "/usr/local/include/pfring.h"])
+fi
+
+dnl> End ARM
+fi
+
+AC_CHECK_LIB([sqlite3], [sqlite3_open])
+
+dnl> Pattern matching
+dnl>
+dnl> AC_CHECK_LIB(pcre, pcre_compile)
+dnl> AC_CHECK_HEADERS(pcre.h)
+
+
+dnl>
+dnl> Leave it here as it might be needed by those linking nProbe
+dnl> against a PF_RING-enabled library
+dnl>
+AC_CHECK_LIB(pfring, pfring_open)
+
+dnl> ##################################
+dnl> !ARM
+dnl> ##################################
+if test ".${HAVE_ARM}" == .; then
+
+dnl>
+dnl> Packet Capture Library by Lawrence Berkeley National Laboratory - Network Research Group
+dnl>
+
+dnl> order as follow
+dnl> 1. user defined libpcap development tree
+dnl> 2. standard installation in /usr/lib and /usr/include respectively
+dnl> 3. default package installation in /usr/local/lib and /usr/local/include respectively
+dnl> 4. libpcap-0.4 development tree under the same nprobe's root directory or in a subdir
+
+AC_MSG_CHECKING([for LBL Packet Capture Library (required package)])
+
+dnl>
+dnl> user defined directory passed as option at configuration time
+dnl>
+PCAP_EXTRA_LIB_DIR=""
+if test ".${PCAP_ROOT}" != .; then
+  if test -d $PCAP_ROOT &&
+dnl>    test -r $PCAP_ROOT/libpcap.a &&
+     test -r $PCAP_ROOT/pcap.h; then
+       PCAP_ROOT=`cd ${PCAP_ROOT} && pwd`
+       CORELIBS="${CORELIBS} -L$PCAP_ROOT -lpcap"
+       INCS="${INCS} -I$PCAP_ROOT"
+       PCAP_EXTRA_LIB_DIR=$PCAP_ROOT
+       AC_MSG_RESULT([found in $PCAP_ROOT])
+  else
+    AC_MSG_RESULT([not found in ${PCAP_ROOT}])
+    AC_MSG_RESULT([             *** FATAL ERROR ***             ])
+    AC_MSG_RESULT([ It looks that you don't have some files needed to use the pcap library.])
+    AC_MSG_RESULT([ Please check the source tree, compile and, optionally, install the software.])
+    AC_MSG_RESULT([ When finished please re-run this program.])
+    AC_MSG_RESULT([ You can download the latest source tarball at http://www.tcpdump.org])
+    AC_MSG_ERROR([ The LBL Packet Capture Library development tree seems corrupted or incomplete!])
+  fi
+elif test -d /usr/local &&
+dnl>   test -r /usr/local/lib/libpcap.a &&
+     test -r /usr/local/include/pcap.h; then
+       PCAP_ROOT="/usr/local"
+       CORELIBS="${CORELIBS} -L$PCAP_ROOT/lib -lpcap"
+       INCS="${INCS} -I$PCAP_ROOT/include"
+       PCAP_EXTRA_LIB_DIR=$PCAP_ROOT
+       AC_MSG_RESULT([found in $PCAP_ROOT])
+dnl>
+dnl> installation used by most packagers
+dnl>
+dnl>elif test -r /usr/lib/libpcap.a &&
+elif     test -r /usr/include/pcap.h; then
+       PCAP_ROOT="standard installation"
+       CORELIBS="${CORELIBS} -lpcap"
+       AC_MSG_RESULT([found in $PCAP_ROOT])
+dnl>
+dnl> installation used by OSX
+dnl>
+elif test -r /usr/lib/libpcap.A.dylib &&
+     test -r /usr/include/pcap.h; then
+       PCAP_ROOT="standard OSX installation"
+       CORELIBS="${CORELIBS} -lpcap"
+       AC_MSG_RESULT([found in $PCAP_ROOT])
+dnl>
+dnl> unusual and more complex installation used by some packagers
+dnl> (e.g. Red Hat Linux)
+dnl>
+dnl>elif test -r /usr/lib/libpcap.a &&
+    elif
+     test -r /usr/include/pcap/pcap.h; then
+       PCAP_ROOT="semi-standard installation"
+       CORELIBS="${CORELIBS} -lpcap"
+       INCS="${INCS} -I/usr/include/pcap"
+       AC_MSG_RESULT([found in $PCAP_ROOT])
+else
+     AC_CHECK_LIB(pcap, pcap_lookupdev)
+     if test "$ac_tr_lib" != "HAVE_LIBPCAP"; then
+       AC_MSG_RESULT([not found!])
+       AC_MSG_RESULT([             *** FATAL ERROR ***             ])
+       AC_MSG_RESULT([ It looks that you don't have the libpcap distribution installed.])
+       AC_MSG_RESULT([ Download, compile and, optionally, install it.])
+       AC_MSG_RESULT([ When finished please re-run this program.])
+       AC_MSG_RESULT([ You can download the latest source tarball at http://www.tcpdump.org/])
+       AC_MSG_ERROR([ The LBL Packet Capture Library, libpcap, was not found! ])
+     else
+	if test -r /usr/include/pcap/pcap.h; then
+	       INCS="${INCS} -I/usr/include/pcap"
+	       PCAP_ROOT="standard installation"
+	else
+       AC_MSG_RESULT([             *** FATAL ERROR ***             ])
+       AC_MSG_RESULT([ It looks that you don't have the libpcap distribution installed.])
+       AC_MSG_RESULT([ Download, compile and, optionally, install it.])
+       AC_MSG_RESULT([ When finished please re-run this program.])
+       AC_MSG_RESULT([ You can download the latest source tarball at http://www.tcpdump.org/])
+       AC_MSG_ERROR([ The LBL Packet Capture Library, libpcap, was not found! ])
+	fi
+fi
+fi
+
+SAVE_LIBS=$LIBS
+if test -n "$PCAP_EXTRA_LIB_DIR"; then
+   LIBS="$LIBS -L$PCAP_EXTRA_LIB_DIR"
+fi
+
+AC_CHECK_LIB([pcap], [pcap_next_ex], AC_DEFINE_UNQUOTED(HAVE_PCAP_NEXT_EX, 1, [pcap has pcap_next_ex]))
+LIBS=$SAVE_LIBS
+dnl> ##################################
+
+dnl> GeoIP (http://www.maxmind.com/)
+GEOIP_TARGET=
+AC_CHECK_LIB([GeoIP], [GeoIP_record_by_ipnum])
+AC_HAVE_HEADERS(GeoIP.h)
+
+if test ".${ac_cv_lib_GeoIP_GeoIP_record_by_ipnum}" = ".yes" &&
+   test ".${ac_cv_header_GeoIP_h}" = ".yes"; then
+
+AC_CHECK_LIB([GeoIP], [GeoIP_record_by_ipnum_v6])
+if test ".${ac_cv_lib_GeoIP_GeoIP_record_by_ipnum_v6}" = ".yes"; then
+   AC_DEFINE_UNQUOTED(HAVE_GEOIP_IPv6, 1, [GeoIP IPv6 support is present])
+fi
+
+LIBS="$LIBS -lGeoIP"
+AC_DEFINE_UNQUOTED(HAVE_GEOIP, 1, [GeoIP support is present])
+GEOIP_DEP="GeoIP >= 1.4.5"
+GEOIP_TARGET=datfiles
+else
+AC_MSG_RESULT(Build nprobe without geolocation - GeoIP (http://www.maxmind.com/))
+GEOIP_DEP=""
+fi
+
+dnl>
+dnl> PYTHON
+dnl>
+if test ".${ac_disable_python}" != ".yes"; then
+  AC_CHECK_TOOL(PYTHON, python)
+  if test "x$ac_cv_prog_ac_ct_PYTHON" = "xpython"; then
+    PYTHON_CONFIG_PATH=`which python-config`
+    if test "x$PYTHON_CONFIG_PATH" = "x"; then
+        if test -f "/etc/redhat-release"; then
+    	  PYTHON_CONFIG_PATH="./python-config"
+	fi
+    fi
+
+    if test "x$PYTHON_CONFIG_PATH" != "x"; then
+        PYTHON_INCS=`$PYTHON_CONFIG_PATH --includes`
+	BKP_CFLAGS=${CFLAGS}
+	CFLAGS="${CFLAGS} ${PYTHON_INCS}"
+
+        AC_HAVE_HEADERS(Python.h)
+	if test ".${ac_cv_header_Python_h}" = ".yes"; then
+	   AC_DEFINE_UNQUOTED(HAVE_PYTHON, 1, [Python is supported])
+	   PYTHON_LIBS="`$PYTHON_CONFIG_PATH --libs`"
+	   echo "Python libs: ${PYTHON_LIBS}"
+	   LIBS="${LIBS} ${PYTHON_LIBS}"
+	   dnl remove unecessary path
+	   dnl line below workaround for OSX 10.6 (Snow Leopard)
+	   INCS="${INCS} ${PYTHON_INCS}"
+	 else
+	  AC_MSG_RESULT("Python is present but it looks the -devel package is missing")
+	  AC_MSG_RESULT("Do 'yum install python-devel' (RedHat) or 'apt-get install python-dev' (Debian/Ubuntu)")
+	  CFLAGS=${BKP_CFLAGS}
+	 fi
+    else
+    AC_MSG_RESULT("Python is present but it looks the -devel package is missing")
+    AC_MSG_RESULT("Do 'yum install python-devel' (RedHat) or 'apt-get install python-dev' (Debian/Ubuntu)")
+    fi
+  else
+    AC_MSG_RESULT(Python is not present)
+  fi
+fi
+
+
+dnl> FastBit
+if test -f "fastbit/fastbit.c"; then
+  AC_CHECK_HEADERS([capi.h])
+  if test "x$ac_cv_header_capi_h" = "xyes"; then
+   AC_CHECK_LIB([fastbit], [fastbit_init])
+   if test "x$ac_cv_lib_fastbit_fastbit_init" = "xyes"; then
+    CPPFLAGS="$CPPFLAGS"
+    AC_LANG(C++)
+    AC_TRY_RUN([
+	#include <ibis.h>
+        int main()
+	{
+         /* Required version of FastBit >= 1.1.8.3 */
+	 if (ibis::util::getVersionNumber() >= 1010803)
+	  return 0;
+	 else
+	  return -1;
+        }
+	],
+	[ AC_DEFINE_UNQUOTED(HAVE_FASTBIT, 1, [use FastBit]) ],
+	[ AC_MSG_WARN([** FastBit is present but its version is too old: please update to latest version **]) ]
+	)
+    AC_LANG(C)
+   fi
+  fi
+fi
+
+PATH=$PATH:/usr/local/mysql/bin
+AC_CHECK_TOOL(MYSQL, mysql_config)
+dnl> echo "--> $ac_cv_prog_ac_ct_MYSQL"
+if test "x$ac_cv_prog_ac_ct_MYSQL" = "xmysql_config"; then
+#  MYSQLLIBS="`mysql_config --libs_r`|grep Usage"
+  MYSQLLIBS="`mysql_config --libs_r`"
+  OLD_LIBS=${LIBS}
+  OLD_INCS=${INCS}
+  if test ".$MYSQLLIBS" != "."; then
+    LIBS="${LIBS} `mysql_config --libs`"
+  else
+    LIBS="${LIBS} `mysql_config --libs_r`"
+  fi
+  INCS="${INCS} `mysql_config --cflags`"
+dnl> The line below is necessary for passing to gcc the new includes
+  OLD_CPPFLAGS=${CPPFLAGS}
+  CPPFLAGS="${CPPFLAGS} ${INCS}"
+  AC_CHECK_HEADERS(mysql.h mysql/mysql.h)
+   if test ".${ac_cv_header_mysql_h}" != ".yes" &&
+      test ".${ac_cv_header_mysql_mysql_h}" != ".yes"; then
+     LIBS=${OLD_LIBS}
+     INCS=${OLD_INCS}
+  else
+    AC_DEFINE_UNQUOTED(HAVE_MYSQL, 1, [use mysql])
+     LIBS="${LIBS} -lwrap"
+   fi
+   CPPFLAGS=${OLD_CPPFLAGS}
+else
+   echo "MySQL not found. Database support disabled";
+fi
+
+dnl> !ARM
+fi
+
+PLUGINS=plugins
+AC_DEFINE_UNQUOTED(ENABLE_PLUGINS, 1, [ Enable plugin support ])
+
+dnl>
+AC_SUBST(VERSION)
+AC_SUBST(INCS)
+AC_SUBST(LIBS)
+AC_SUBST(CFLAGS)
+AC_SUBST(LDFLAGS)
+AC_SUBST(DYN_FLAGS)
+AC_SUBST(CCLD)
+AC_SUBST(LIBTOOL_DEPS)
+AC_SUBST(PLUGINS)
+AC_SUBST(CORELIBS)
+AC_SUBST(MOREOBJECTS)
+AC_SUBST(SO_VERSION_PATCH)
+AC_SUBST(MAKE_SHARED_LIBRARY_PARM)
+AC_SUBST(MORESOURCES)
+AC_SUBST(MORELIBS)
+AC_SUBST(PFRING)
+AC_SUBST(REV)
+AC_SUBST(GEO_DIR)
+AC_SUBST(GEOIP_DEP)
+AC_SUBST(INSTALL_DIR)
+AC_SUBST(PLATFORM)
+AC_SUBST(GEOIP_TARGET)
+
+
+AC_CONFIG_FILES([Makefile])
+AC_CONFIG_FILES([fastbit/Makefile])
+AC_CONFIG_FILES([nprobe.spec])
+
+dnl> Use plugins/Makefile if you enable plugins
+if test ".${ac_disable_plugins}" != ".yes"; then
+    AC_CONFIG_FILES([plugins/Makefile])
+fi
+
+AC_OUTPUT()
+
+if test ".${HAVE_ARM}" == ".1"; then
+ \rm -f libtool
+ cp libtool.arm libtool
+ echo "Using custom libtool for the ARM platform"
+else
+ \/bin/rm -f libtool
+ ln -s $LIBTOOL_PATH libtool
+fi
+
+dnl>
+dnl> versioning
+dnl>
+echo "creating version.c"
+/bin/rm -f version.c
+echo $PACKAGE_VERSION | sed -e 's/.*/char * version   = "&";/' > version.c
+./config.guess | sed -e 's/.*/char * osName    = "&";/' >> version.c
+date +"%D %r" | sed -e 's/.*/char * buildDate = "&";/' >> version.c
+
+if test ".${HAS_WARNING}" = ".yes"; then
+    echo "*"
+    echo "*>>>>  A WARNING message was generated - please review the"
+    echo "*>>>>  output before continuing to make nprobe!"
+fi
+
+echo "
+
+This is your $PACKAGE_NAME $PACKAGE_VERSION configuration:
+
+Host System Type  : ${host} (${PLATFORM})
+Compiler (cflags) : ${CC} ${CFLAGS} ${DEFS}
+Include path      : ${INCS}
+System Libs       : ${LDFLAGS} ${LIBS}
+Core Libs         : ${CORELIBS}
+Additional Libs   : ${MORELIBS}
+LBL pcap in       : ${PCAP_ROOT}
+Install path      : ${prefix}
+
+Now type 'make' or 'gmake' (GNU make) on *BSD and Solaris
+systems to build $PACKAGE $VERSION.
+"
+
+if test ".${GEOIP_DEP}" != ""; then
+echo "
+
+IMPORTANT
+
+Please type 'make datfiles' in order to download the data file
+necessary for geolocation.
+"
+fi
+
+exit 0

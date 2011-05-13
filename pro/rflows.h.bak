@@ -1,0 +1,46 @@
+/*
+ *  Copyright (C) 2006-08 Luca Deri <deri@ntop.org>
+ *
+ *  			  http://www.ntop.org/
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ */
+
+#define NUM_RFLOWS_RECORDS_PER_PACKET_V1   64
+
+typedef struct {
+  u_int8_t version, num_records;
+  u_int16_t sequence_num;
+  u_int32_t timestamp; /* seconds UTC */  
+} RflowsHeader;
+
+#define RFLOWSPACKETRECORD_V1_LEN 22
+
+typedef struct {
+  u_int32_t timestamp; /* nanoseconds UTC */  
+  u_int32_t src_ip, dst_ip;
+  u_int16_t src_port, dst_port;
+  u_int8_t  ip_proto, ip_tos, tcp_flags, unused;
+  u_int16_t packet_len;
+} RflowsPacketRecord_v1;
+
+typedef struct {
+  RflowsHeader header;
+  RflowsPacketRecord_v1 records[NUM_RFLOWS_RECORDS_PER_PACKET_V1];
+} RflowsPacket_v1;
+
+/* ****************************** */
+
+extern void processRflowsPacket(char *packet, u_int packet_len, u_int32_t sender_ip);
