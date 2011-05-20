@@ -25,8 +25,8 @@
 static void processPfringPktHdr(struct pfring_pkthdr *hdr, char *packet) {
   IpAddress src, dst;
   struct in_addr addr;
-  int payload_offset = hdr->extended_hdr.parsed_pkt.pkt_detail.offset.eth_offset
-    +hdr->extended_hdr.parsed_pkt.pkt_detail.offset.payload_offset;
+  int payload_offset = hdr->extended_hdr.parsed_pkt.offset.eth_offset
+    + hdr->extended_hdr.parsed_pkt.offset.payload_offset;
   int payload_len = (payload_offset > hdr->len) ? 0 : hdr->len - payload_offset;
   struct eth_header ehdr;
   struct pcap_pkthdr h;
