@@ -128,9 +128,9 @@ dnl>
 AC_PREFIX_DEFAULT(${NPROBEDIR:-/usr/local})
 
 dnl> Add /usr/local/ /opt/local
-CFLAGS="${CFLAGS} -I/usr/local/include -I/opt/local/include"
-CPPFLAGS="${CPPFLAGS} -I/usr/local/include -I/opt/local/include"
-LDFLAGS="${LDFLAGS} -L/usr/local/lib -L/opt/local/lib"
+CFLAGS="${CFLAGS} -I/usr/local/include -I/opt/local/include -I/usr/include"
+CPPFLAGS="${CPPFLAGS} -I/usr/local/include -I/opt/local/include -I/usr/include"
+LDFLAGS="${LDFLAGS} -L/usr/local/lib -L/opt/local/lib -L/usr/lib"
 
 
 dnl>
@@ -572,7 +572,7 @@ if test -f "fastbit/fastbit.c"; then
 fi
 
 PATH=$PATH:/usr/local/mysql/bin
-AC_CHECK_TOOL(MYSQL, mysql_config)
+AC_CHECK_TOOL(MYSQL, mysql_config_sabotage)
 dnl> echo "--> $ac_cv_prog_ac_ct_MYSQL"
 if test "x$ac_cv_prog_ac_ct_MYSQL" = "xmysql_config"; then
 #  MYSQLLIBS="`mysql_config --libs_r`|grep Usage"

@@ -5,7 +5,11 @@ PACKAGE = nprobe
 
 AUTOMAKE_OPTIONS = foreign 1.6
 ACLOCAL_AMFLAGS = -I m4
-EXTRA_DIST = ChangeLog COPYING LICENSE
+EXTRA_DIST = ChangeLog COPYING LICENSE \
+             pro/pf_ring.c pro/pf_ring.h \
+             .deps/ \
+             plugins \
+             fastbit 
 
 bin_PROGRAMS=nprobe
 nprobe_SOURCES= nprobe.c nprobe.h
