@@ -36,3 +36,5 @@ version.c
 plugins/Makefile
 plugins/Makefile.in
 
+# Debian-specific
+debian/nprobe.debhelper.log
