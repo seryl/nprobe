@@ -1,0 +1,15 @@
+Source: nprobe
+Section: net
+Priority: extra
+Maintainer: Xavier Lange <xrlange@gmail.com>
+Build-Depends: debhelper (>= 7), autotools-dev
+Standards-Version: 3.8.3
+Homepage: http://github.com/xrl/nprobe
+
+Package: nprobe
+Architecture: any
+Depends: pfring-dkms, libpfring 
+Description: The ntop.org nprobe package built with
+ PF_RING support. Yeah, I know: awesome. Build process
+ has been gutted from upstream to support a clean
+ "make dist".

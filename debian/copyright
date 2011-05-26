@@ -1,0 +1,34 @@
+This work was packaged for Debian by:
+
+    Xavier Lange <xrlange@gmail.com> on Thu, 26 May 2011 13:04:15 -0700
+
+It was downloaded from <url://ntop.org/>
+
+Upstream Author(s):
+
+    Luca Deri
+    Others
+
+Copyright:
+
+    Copyright (C) 2002-2011 Luca Deri
+
+License:
+
+    GPLv2
+
+The Debian packaging is:
+
+    Copyright (C) 2011 Xavier Lange <xrlange@gmail.com>
+
+# Please chose a license for your packaging work. If the program you package
+# uses a mainstream license, using the same license is the safest choice.
+# Please avoid to pick license terms that are more restrictive than the
+# packaged work, as it may make Debian's contributions unacceptable upstream.
+# If you just want it to be GPL version 3, leave the following lines in.
+
+and is licensed under the GPL version 2, 
+see `/usr/share/common-licenses/GPL-2'.
+
+# Please also look if there are files or directories which have a
+# different copyright/license attached and list them here.

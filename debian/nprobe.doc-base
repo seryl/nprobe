@@ -1,0 +1,20 @@
+Document: nprobe
+Title: Debian nprobe Manual
+Author: Xavier Lange
+Abstract: This manual describes what nprobe is
+ and how it can be used to
+ manage online manuals on Debian systems.
+Section: unknown
+
+Format: debiandoc-sgml
+Files: /usr/share/doc/nprobe/nprobe.sgml.gz
+
+Format: postscript
+Files: /usr/share/doc/nprobe/nprobe.ps.gz
+
+Format: text
+Files: /usr/share/doc/nprobe/nprobe.text.gz
+
+Format: HTML
+Index: /usr/share/doc/nprobe/html/index.html
+Files: /usr/share/doc/nprobe/html/*.html

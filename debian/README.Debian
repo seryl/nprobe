@@ -1,0 +1,7 @@
+nprobe for Debian
+-----------------
+
+This software was purchased from ntop.org.  The build system has been
+reworked to make it a nicer FOSS citizen.
+
+ -- Xavier Lange <xrlange@gmail.com>  Thu, 26 May 2011 13:04:15 -0700
