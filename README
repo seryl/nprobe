@@ -7,7 +7,9 @@ It has been designed to be compact, easy to embed, an memory/CPU savvy.
 
 Build Steps
 ===========
+(cd plugins && ./buildMakrFile.sh > Makefile.in)
 ./autogen.sh
+./configure
 make
 sudo make install
 
