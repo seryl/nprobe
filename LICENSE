@@ -1,20 +1,65 @@
 
-        nProbe - a Netflow v5/v9/IPFIX probe for IPv4/v6
+LICENSE
 
-         Copyright (C) 2002-11 Luca Deri <deri@ntop.org>
+This file describes the terms under which nProbe is distributed.
 
-                     http://www.ntop.org/
 
-  This program is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation; either version 2 of the License, or
-  (at your option) any later version.
+Redistribution
+==============
+If you have received the nProbe source, you can run it without license
+that instead is required for binary packages for which we provide
+support.
 
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
+If you have received the nProbe source as a research/academic institution,
+you are requested not to distribute the source outside your
+institution, or not distribute it at all.
 
-  You should have received a copy of the GNU General Public License along
-  with this program; if not, write to the Free Software Foundation, Inc.,
-  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+/* ************** IMPORTANT PLEASE READ ************** */
+
+nProbe is (C) 2002-14 by Luca Deri <deri@ntop.org> that is
+distributed under GNU GPL who owns the nProbe intellectual property
+and copyright (beside the sFlow collector code).
+
+If you wish to integrate or embed nProbe into a proprietary software
+or an embedded software/hardware solution such as the nBox, be
+aware that we offer alternative licenses that allow you to do that.
+Please contact license@ntop.org.
+
+GPL requires that any work derived from a GPL licensed work
+(as nProbe) must also be distributed under GPL. As the term
+"derivative work" (see http://en.wikipedia.org/wiki/Derivative_work)
+is not entirely clear we want to clarify this concept in the case of
+nProbe. We consider a derivated work of nProbe for the purpose of
+this license if it does any of the following:
+- Integrates (even partially) nProbe source code
+- Includes (even partially) nProbe copyrighted data files
+- Integrates/embeds nProbe into a binary installer/application
+- Includes the nProbe into an appliance, router or similar device
+- Links (even through nProbe's plugins) to a library that is not
+  available under GPL
+- Executes nProbe and uses the produced results (usually flows
+  either on the network, disk or database)
+
+Note that the list applies to both nProbe "as a whole" and also
+to portions of it. The above list is not exhaustive but it's
+used to clarify the term derivative work with respect to nProbe.
+This means that:
+- nothing prevents you from distributing a proprietary product
+  (either appliance, GUI front-end, or application) based on
+  nProbe. Just sell/distribute it *without* nProbe, and point
+  your customers to http://www.ntop.org/products/nprobe/ in order
+  to have access to nProbe.
+- you cannot include nProbe into a non-GPL derivative work.
+
+Note that the above is a clarification of what we mean for
+"derivative work" in the scope of the GPL-licensed nProbe.
+This interpretation applies only to nProbe and not to any
+other GPL products.
+
+if you have questions about nProbe licensing please
+contact license@ntop.org
+
+See COPYING and EULA files for more details.
+
+Note that the EULA applies *only* to nProbe derived work.

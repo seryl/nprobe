@@ -1,0 +1,115 @@
+Summary: Packet-to-disk application
+Name: n2disk
+Version: @N2DISK_PACKAGE_VERSION@
+Release: %{buildnumber}
+License: Proprietary
+Group: Networking/Utilities
+URL: http://www.ntop.org/
+Source: n2disk-%{version}.tgz
+Packager: Luca Deri <deri@ntop.org>
+# Temporary location where the RPM will be built
+BuildRoot:  %{_tmppath}/%{name}-%{version}-root
+Requires: pfring = @PFRING_VERSION@-@PFRING_SVN_RELEASE@ numactl coreutils
+
+%description
+Packet-to-disk application.
+
+%prep
+
+%setup -q
+
+%build
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+if [ -x ./configure ]; then
+  CFLAGS="$RPM_OPT_FLAGS" ./configure
+else
+  CFLAGS="$RPM_OPT_FLAGS" ./autogen.sh
+fi
+cd private/license; make
+cd ..
+make
+cd ..
+#
+
+# Installation may be a matter of running an install make target or you
+# may need to manually install files with the install command.
+%install
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+if [ -d $RPM_BUILD_ROOT ]; then
+	\rm -rf $RPM_BUILD_ROOT
+fi
+mkdir -p $RPM_BUILD_ROOT/usr/local/bin $RPM_BUILD_ROOT/usr/local/share/n2disk $RPM_BUILD_ROOT/usr/local/man/man8 
+mkdir -p $RPM_BUILD_ROOT/etc/init $RPM_BUILD_ROOT/etc/init.d $RPM_BUILD_ROOT/etc/logrotate.d
+cp private/n2disk private/n2disk1g private/n2disk10gdna private/n2disk10gzc private/disk2n $RPM_BUILD_ROOT/usr/local/bin
+# Temporary fix until we migrate to ZC
+cd $RPM_BUILD_ROOT/usr/local/bin; ln -s n2disk10gdna n2disk10g; cd -
+# Napatech
+#cp $HOME/Napatech/n2disknt $RPM_BUILD_ROOT/usr/local/bin
+#
+cp private/npcapdecompress private/npcapextract private/npcapindex $RPM_BUILD_ROOT/usr/local/bin
+strip $RPM_BUILD_ROOT/usr/local/bin/*
+cp $HOME/nBox/doc/n2disk-UsersGuide.pdf $RPM_BUILD_ROOT/usr/local/share/n2disk
+cp private/n2disk.8 $RPM_BUILD_ROOT/usr/local/man/man8
+cp $HOME/nProbe/packages/etc/init/n2disk.conf		$RPM_BUILD_ROOT/etc/init
+cp $HOME/nProbe/packages/etc/init/disk2n.conf		$RPM_BUILD_ROOT/etc/init
+cp $HOME/nProbe/packages/etc/init.d/n2disk		$RPM_BUILD_ROOT/etc/init.d
+cp $HOME/nProbe/packages/etc/init.d/disk2n		$RPM_BUILD_ROOT/etc/init.d
+cp $HOME/nProbe/packages/etc/logrotate.d/n2disk	      	$RPM_BUILD_ROOT/etc/logrotate.d
+cp $HOME/nProbe/packages/etc/logrotate.d/disk2n	      	$RPM_BUILD_ROOT/etc/logrotate.d
+#
+DST=$RPM_BUILD_ROOT/usr/local/n2disk
+SRC=$RPM_BUILD_DIR/%{name}-%{version}
+mkdir -p $DST/conf
+# Clean out our build directory
+%clean
+rm -fr $RPM_BUILD_ROOT
+
+# %post is the macro to do post-install scripts.
+%post
+n2disk_found=`/bin/grep ^n2disk /etc/passwd|wc -l`
+if [ "$n2disk_found" -eq "0" ]; then
+  /usr/sbin/useradd n2disk -p n2disk -M
+  chkconfig --add n2disk
+fi
+
+# %postun is the macro to do post-uninstall scripts.
+%postun
+n2disk_found=`/bin/grep ^n2disk /etc/passwd|wc -l`
+if [ "$n2disk_found" -eq "1" ]; then
+  /usr/sbin/userdel -f n2disk
+fi
+
+%files
+/usr/local/bin/n2disk
+/usr/local/bin/n2disk1g
+/usr/local/bin/n2disk10gdna
+/usr/local/bin/n2disk10gzc
+# Temportary
+/usr/local/bin/n2disk10g
+/usr/local/bin/disk2n
+# Napatech
+#/usr/local/bin/n2disknt
+#
+/usr/local/bin/npcapdecompress
+/usr/local/bin/npcapextract
+/usr/local/bin/npcapindex
+/usr/local/man/man8/n2disk.8
+/usr/local/share/n2disk/n2disk-UsersGuide.pdf
+/etc/init/n2disk.conf
+/etc/init/disk2n.conf
+/etc/init.d/n2disk
+/etc/init.d/disk2n
+/etc/logrotate.d/n2disk
+/etc/logrotate.d/disk2n
+
+# Set the default attributes of all of the files specified to have an
+# owner and group of root and to inherit the permissions of the file
+# itself.
+%defattr(-, root, root)
+
+%changelog
+* Tue Jul 31 2012 Luca Deri <deri@ntop.org> 2.0
+- Current package version
+
+

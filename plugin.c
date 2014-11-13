@@ -1,10 +1,10 @@
-/* 
- *        nProbe - a Netflow v5/v9/IPFIX probe for IPv4/v6 
+/*
+ *        nProbe - a Netflow v5/v9/IPFIX probe for IPv4/v6
  *
- *       Copyright (C) 2004-11 Luca Deri <deri@ntop.org> 
+ *       Copyright (C) 2004-14 Luca Deri <deri@ntop.org>
  *
- *                     http://www.ntop.org/ 
- * 
+ *                     http://www.ntop.org/
+ *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2 of the License, or
@@ -22,32 +22,41 @@
 
 #include "nprobe.h"
 
+#ifdef HAVE_PLUGIN_LICENSE
+#include "private/license/license.h"
+#endif
+
 /* *********************************************** */
 
-static u_short numDeleteFlowFctn, numPacketFlowFctn;
-static PluginInfo *all_plugins[MAX_NUM_PLUGINS+1] = { NULL };
-static uint num_plugins;
-static PluginInfo *all_active_plugins[MAX_NUM_PLUGINS+1] = { NULL };
-static uint num_active_plugins;
 
 #ifdef MAKE_STATIC_PLUGINS
-extern PluginInfo* sipPluginEntryFctn(void);
-extern PluginInfo* rtpPluginEntryFctn(void);
-extern PluginInfo* dumpPluginEntryFctn(void);
-extern PluginInfo* dbPluginEntryFctn(void);
+extern PluginEntryPoint* sipPluginEntryFctn(void);
+extern PluginEntryPoint* rtpPluginEntryFctn(void);
+extern PluginEntryPoint* dbPluginEntryFctn(void);
 #ifdef WIN32
-extern PluginInfo* processPluginEntryFctn(void);
+extern PluginEntryPoint* processPluginEntryFctn(void);
 #endif
-extern PluginInfo* l7PluginEntryFctn(void);
-
-/* extern PluginInfo* classIdPluginEntryFctn(void); */
-extern PluginInfo* httpPluginEntryFctn(void);
-extern PluginInfo* smtpPluginEntryFctn(void);
-extern PluginInfo* mysqlPluginEntryFctn(void);
-extern PluginInfo* bgpPluginEntryFctn(void);
+extern PluginEntryPoint* l7BridgePluginEntryFctn(void);
+extern PluginEntryPoint* gtpv0PluginEntryFctn(void);
+extern PluginEntryPoint* gtpv1PluginEntryFctn(void);
+extern PluginEntryPoint* gtpv2PluginEntryFctn(void);
+extern PluginEntryPoint* radiusPluginEntryFctn(void);
+extern PluginEntryPoint* oraclePluginEntryFctn(void);
+extern PluginEntryPoint* httpPluginEntryFctn(void);
+extern PluginEntryPoint* smtpPluginEntryFctn(void);
+extern PluginEntryPoint* mysqlPluginEntryFctn(void);
+extern PluginEntryPoint* bgpPluginEntryFctn(void);
+extern PluginEntryPoint* dnsPluginEntryFctn(void);
+extern PluginEntryPoint* nflitePluginEntryFctn(void);
+extern PluginEntryPoint* radiusPluginEntryFctn(void);
+extern PluginEntryPoint* dhcpPluginEntryFctn(void);
 #else
-static char *pluginDirs[] = { "./plugins",
-			      "/usr/local/lib/nprobe/plugins",
+
+#define PLUGIN_DIR_LOCAL "./plugins"
+#define PLUGIN_DIR_SYSTEM PREFIX "/lib/nprobe/plugins"
+
+static char *pluginDirs[] = { PLUGIN_DIR_LOCAL,
+			      PLUGIN_DIR_SYSTEM,
 			      NULL };
 #endif
 
@@ -57,17 +66,17 @@ static void loadPlugin(char *dirName, char *pluginName);
 
 /* *********************************************** */
 
-static int plugin_sanity_check(char *name, V9V10TemplateElementId *rc, 
+static int plugin_sanity_check(char *name, V9V10TemplateElementId *rc,
 			       char *ref_name, V9V10TemplateElementId *ref_template) {
   /* Sanity check */
 
   if(rc != NULL) {
     int j = 0;
-    
+
     while(rc[j].templateElementId != 0) {
       /* Search the elementId among the standard fields */
       int k =0;
-      
+
       while(ref_template[k].templateElementId != 0) {
 	if(ref_template[k].templateElementId == rc[j].templateElementId) {
 	  traceEvent(TRACE_ERROR, "FATAL ERROR: elementId clash [%s][%d][%s] that conflicts with [%s][%d][%s]",
@@ -77,7 +86,7 @@ static int plugin_sanity_check(char *name, V9V10TemplateElementId *rc,
 	} else
 	  k++;
       }
-      
+
       j++;
     }
   }
@@ -87,8 +96,8 @@ static int plugin_sanity_check(char *name, V9V10TemplateElementId *rc,
 
 /* *********************************************** */
 
-void initPlugins(int argc, char* argv[]) {
-  int i;
+void loadPlugins() {
+  static u_int8_t done = 0;
 #ifndef MAKE_STATIC_PLUGINS
   int idp = 0;
 #ifndef WIN32
@@ -98,34 +107,44 @@ void initPlugins(int argc, char* argv[]) {
 #endif
 #endif
 
+  if(done) return; else done++;
+
   /* ******************************** */
 
   /* Register plugins */
-  num_plugins = num_active_plugins = 0;
+  readOnlyGlobals.num_plugins = readOnlyGlobals.num_active_plugins = 0;
 
 #ifdef MAKE_STATIC_PLUGINS
 #ifdef ENABLE_PLUGINS
-  traceEvent(TRACE_INFO, "Initializing static plugins.");
+  traceEvent(TRACE_INFO, "Initializing static plugins...");
 
+#ifndef USE_SPARROW
   loadPlugin(NULL, "sipPlugin");
   loadPlugin(NULL, "rtpPlugin");
   loadPlugin(NULL, "httpPlugin");
   loadPlugin(NULL, "smtpPlugin");
-  loadPlugin(NULL, "mysqlPlugin");
   loadPlugin(NULL, "bgpPlugin");
-
-  loadPlugin(NULL, "dumpPlugin");
-  loadPlugin(NULL, "dbPlugin");
-
-#ifdef WIN32
+  loadPlugin(NULL, "nflitePlugin");
+  loadPlugin(NULL, "dnsPlugin");
+  loadPlugin(NULL, "oraclePlugin");
+  loadPlugin(NULL, "gtpv0Plugin");
+  loadPlugin(NULL, "gtpv1Plugin");
+  loadPlugin(NULL, "gtpv2Plugin");
+  loadPlugin(NULL, "radiusPlugin");
+  loadPlugin(NULL, "dhcpPlugin");
+#ifndef WIN32
+  /* Win32-only plugins */
   loadPlugin(NULL, "processPlugin");
 #endif
+ #endif
 
-#if defined(HAVE_PCRE_H) && defined(HAVE_LIBPCRE)
-  loadPlugin(NULL, "l7Plugin");
+  loadPlugin(NULL, "dbPlugin");
+  loadPlugin(NULL, "mysqlPlugin");
+
+#ifdef HAVE_PF_RING
+  loadPlugin(NULL, "l7BridgePlugin");
 #endif
 
-  /* loadPlugin(NULL, "classIdPlugin"); */
 #endif
 
 #else /* MAKE_STATIC_PLUGINS */
@@ -156,17 +175,20 @@ void initPlugins(int argc, char* argv[]) {
 	      || strcmp(&dp->d_name[strlen(dp->d_name)-strlen(PLUGIN_EXTENSION)], PLUGIN_EXTENSION))
 	continue;
 
-      /* Check if a plugin with version name exists: 
-	 if so we ignore this plugin and load the other one */
-      
+      /*
+	Check if a plugin with version name exists:
+	if so we ignore this plugin and load the other one
+      */
+
       snprintf(buf, sizeof(buf), "%s/%s", dirPath, dp->d_name);
       buf[strlen(buf)-strlen(PLUGIN_EXTENSION)] = '\0';
-      
+
       snprintf(&buf[strlen(buf)], sizeof(buf)-strlen(buf), "-%s%s",
 	       version, PLUGIN_EXTENSION);
-      
+
       if(stat(buf, &st) == 0) {
-	traceEvent(TRACE_INFO, "Plugin %s also exists: skipping %s/%s", buf, dirPath, dp->d_name);
+	traceEvent(TRACE_INFO, "Plugin %s also exists: skipping %s/%s",
+		   buf, dirPath, dp->d_name);
       } else
 	loadPlugin(dirPath, dp->d_name);
     }
@@ -175,25 +197,69 @@ void initPlugins(int argc, char* argv[]) {
   }
 
 #endif /* MAKE_STATIC_PLUGINS */
+}
 
-  /* ******************************** */
+/* *********************************************** */
 
-  numDeleteFlowFctn = numPacketFlowFctn = 0;
+PluginEntryPoint* get_plugin_info(char *short_name) {
+  int i = 0;
+
+  while((i < MAX_NUM_PLUGINS) && (readOnlyGlobals.all_plugins[i] != NULL)) {
+    if(readOnlyGlobals.all_plugins[i]->enabled || readOnlyGlobals.all_plugins[i]->always_enabled) { 
+      if(strcmp(readOnlyGlobals.all_plugins[i]->short_name, short_name) == 0) {
+	return(readOnlyGlobals.all_plugins[i]);
+      }
+    }
+
+    i++;
+  }
+  
+  return(NULL);
+}
+
+/* *********************************************** */
+
+void initPlugins() {
+  int i;
+
+  loadPlugins();
+
+  readOnlyGlobals.numDeleteFlowFctn = readOnlyGlobals.numPacketFlowFctn = 0;
 
   i = 0;
-  while((i < MAX_NUM_PLUGINS) && (all_plugins[i] != NULL)) {
-    if(all_plugins[i]->enabled || all_plugins[i]->always_enabled) {
-      /* traceEvent(TRACE_INFO, "-> %s", all_plugins[i]->name); */
-      if(all_plugins[i]->initFctn != NULL) all_plugins[i]->initFctn(argc, argv);
-      if(all_plugins[i]->deleteFlowFctn != NULL) numDeleteFlowFctn++;
-      if(all_plugins[i]->packetFlowFctn != NULL) numPacketFlowFctn++;
+  while((i < MAX_NUM_PLUGINS) && (readOnlyGlobals.all_plugins[i] != NULL)) {
+    if(readOnlyGlobals.all_plugins[i]->enabled || readOnlyGlobals.all_plugins[i]->always_enabled) {
+      /* traceEvent(TRACE_INFO, "-> %s", readOnlyGlobals.all_plugins[i]->name); */
+      if(readOnlyGlobals.all_plugins[i]->initFctn != NULL) readOnlyGlobals.all_plugins[i]->initFctn(readOnlyGlobals.argc, readOnlyGlobals.argv);
+      if(readOnlyGlobals.all_plugins[i]->deleteFlowFctn != NULL) readOnlyGlobals.numDeleteFlowFctn++;
+      if(readOnlyGlobals.all_plugins[i]->packetFlowFctn != NULL) readOnlyGlobals.numPacketFlowFctn++;
     }
 
     i++;
   }
 
   traceEvent(TRACE_INFO, "%d plugin(s) loaded [%d delete][%d packet].",
-	     i, numDeleteFlowFctn, numPacketFlowFctn);
+	     i, readOnlyGlobals.numDeleteFlowFctn,
+	     readOnlyGlobals.numPacketFlowFctn);
+}
+
+/* *********************************************** */
+
+static void unloadPlugins() {
+#ifndef WIN32
+	int i = 0;
+
+  while(readOnlyGlobals.pluginDlopenHandle[i] != NULL) {
+    dlclose(readOnlyGlobals.pluginDlopenHandle[i]);
+    i++;
+  }
+#endif
+}
+
+/* *********************************************** */
+
+const struct option* buildCLIOptions() {
+  return(NULL);
 }
 
 /* *********************************************** */
@@ -204,10 +270,26 @@ void termPlugins() {
   traceEvent(TRACE_INFO, "Terminating plugins.");
 
   i = 0;
-  while((i < MAX_NUM_PLUGINS) && (all_plugins[i] != NULL)) {
-    if(all_plugins[i]->enabled && all_plugins[i]->termFctn) {
-      traceEvent(TRACE_INFO, "Terminating %s", all_plugins[i]->name);
-      all_plugins[i]->termFctn();
+  while((i < MAX_NUM_PLUGINS) && (readOnlyGlobals.all_plugins[i] != NULL)) {
+    if(readOnlyGlobals.all_plugins[i]->enabled && readOnlyGlobals.all_plugins[i]->termFctn) {
+      traceEvent(TRACE_INFO, "Terminating %s", readOnlyGlobals.all_plugins[i]->name);
+      readOnlyGlobals.all_plugins[i]->termFctn();
+    }
+
+    i++;
+  }
+
+  unloadPlugins();
+}
+
+/* *********************************************** */
+
+void dumpPluginStats(u_int timeDifference) {
+  int i = 0;
+
+  while((i < MAX_NUM_PLUGINS) && (readOnlyGlobals.all_plugins[i] != NULL)) {
+    if(readOnlyGlobals.all_plugins[i]->enabled && readOnlyGlobals.all_plugins[i]->pluginStatsFctn) {
+      readOnlyGlobals.all_plugins[i]->pluginStatsFctn();
     }
 
     i++;
@@ -219,11 +301,11 @@ void termPlugins() {
 void dumpPluginTemplates() {
   int i = 0;
 
-  while(all_plugins[i] != NULL) {
-    V9V10TemplateElementId *templates = all_plugins[i]->pluginFlowConf();
+  while(readOnlyGlobals.all_plugins[i] != NULL) {
+    V9V10TemplateElementId *templates = readOnlyGlobals.all_plugins[i]->pluginFlowConf();
 
-    if(templates && (templates[0].templateElementName != NULL)) {
-     printf("\nPlugin %s templates:\n", all_plugins[i]->name);
+    if(templates && (templates[0].netflowElementName != NULL)) {
+     printf("\nPlugin %s templates:\n", readOnlyGlobals.all_plugins[i]->name);
      printTemplateInfo(templates, 0);
    }
 
@@ -236,10 +318,10 @@ void dumpPluginTemplates() {
 void dumpPluginHelp() {
   int i = 0;
 
-  while(all_plugins[i] != NULL) {
-    if(all_plugins[i]->helpFctn) {
-      printf("[%s]\n", all_plugins[i]->name);
-      all_plugins[i]->helpFctn();
+  while(readOnlyGlobals.all_plugins[i] != NULL) {
+    if(readOnlyGlobals.all_plugins[i]->helpFctn) {
+      printf("[%s]\n", readOnlyGlobals.all_plugins[i]->name);
+      readOnlyGlobals.all_plugins[i]->helpFctn();
       printf("\n");
     }
 
@@ -249,88 +331,117 @@ void dumpPluginHelp() {
 
 /* *********************************************** */
 
-void pluginCallback(u_char callbackType, FlowHashBucket* bkt,
+void dumpPluginFamilies() {
+  int i = 0;
+
+  while(readOnlyGlobals.all_plugins[i] != NULL) {
+    printf("%s\t%s\n",
+	   readOnlyGlobals.all_plugins[i]->family ? readOnlyGlobals.all_plugins[i]->family : readOnlyGlobals.all_plugins[i]->short_name,
+	   readOnlyGlobals.all_plugins[i]->name
+	   );
+    i++;
+  }
+}
+
+/* *********************************************** */
+
+void pluginCallback(u_char callbackType,
+		    int packet_if_idx /* -1 = unknown */,
+		    FlowHashBucket* bkt,
 		    FlowDirection direction,
-		    u_short proto, u_char isFragment,
+		    u_int16_t ip_offset, u_short proto, u_char isFragment,
 		    u_short numPkts, u_char tos,
+		    u_int8_t retransmitted_pkt,
 		    u_short vlanId, struct eth_header *ehdr,
 		    IpAddress *src, u_short sport,
 		    IpAddress *dst, u_short dport,
-		    u_int len, u_int8_t flags, 
-		    u_int32_t tcpSeqNum, u_int8_t icmpType,		    
+		    u_int len, u_int8_t flags,
+		    u_int32_t tcpSeqNum, u_int8_t icmpType,
 		    u_short numMplsLabels,
 		    u_char mplsLabels[MAX_NUM_MPLS_LABELS][MPLS_LABEL_LEN],
 		    const struct pcap_pkthdr *h, const u_char *p,
 		    u_char *payload, int payloadLen) {
   int i = 0;
 
-  if(num_active_plugins == 0) return;
+  if(readOnlyGlobals.num_active_plugins == 0) return;
 
   switch(callbackType) {
   case CREATE_FLOW_CALLBACK:
-    while(all_active_plugins[i] != NULL) {
-      switch(callbackType) {
-      case CREATE_FLOW_CALLBACK:
-	if((all_active_plugins[i]->enabled)
-	   && (all_active_plugins[i]->packetFlowFctn != NULL)) {
-	  all_active_plugins[i]->packetFlowFctn(1 /* new flow */,
-						NULL, bkt,
-						direction,
-						proto, isFragment,
-						numPkts, tos,
-						vlanId, ehdr,
-						src, sport,
-						dst, dport,
-						len, flags, tcpSeqNum, icmpType,
-						numMplsLabels,
-						mplsLabels, 
-						h, p, payload, payloadLen);
-	}
-	break;
+    while(readOnlyGlobals.all_active_plugins[i] != NULL) {
+      if((readOnlyGlobals.all_active_plugins[i]->enabled)
+	 && (readOnlyGlobals.all_active_plugins[i]->packetFlowFctn != NULL)) {
+	readOnlyGlobals.all_active_plugins[i]->packetFlowFctn(1 /* new flow */,
+							      packet_if_idx,
+							      NULL, bkt,
+							      direction,
+							      ip_offset, proto, isFragment,
+							      numPkts, tos, retransmitted_pkt,
+							      vlanId, ehdr,
+							      src, sport,
+							      dst, dport,
+							      len, flags, tcpSeqNum, icmpType,
+							      numMplsLabels,
+							      mplsLabels,
+							      h, p, payload, payloadLen);
       }
-      
+
       i++;
     }
     break;
 
   case DELETE_FLOW_CALLBACK:
-    if(bkt->plugin != NULL) {
-      PluginInformation *plugin = bkt->plugin, *next;
+    if(bkt->ext && bkt->ext->plugin) {
+      PluginInformation *plugin = bkt->ext->plugin, *next;
 
       while(plugin != NULL) {
-	if(plugin->pluginPtr->deleteFlowFctn != NULL) {
+	if(plugin->pluginPtr == NULL)
+	  break;
+	else if(plugin->pluginPtr->deleteFlowFctn != NULL) {
 	  plugin->pluginPtr->deleteFlowFctn(bkt, plugin->pluginData);
 	  next = plugin->next;
 	  free(plugin);
-	  bkt->plugin = next;
+	  bkt->ext->plugin = next;
 	  plugin = next;
-	}
+	} else
+	  plugin = plugin->next;
       }
 
-      bkt->plugin = NULL;
+      bkt->ext->plugin = NULL;
     }
     break;
 
   case PACKET_CALLBACK:
-    if(bkt->plugin != NULL) {
-      PluginInformation *plugin = bkt->plugin;
+    if(bkt->ext && bkt->ext->plugin) {
+      PluginInformation *plugin = bkt->ext->plugin;
 
       while(plugin != NULL) {
-	if((plugin->pluginPtr->packetFlowFctn != NULL) 
-	   && plugin->pluginPtr->call_packetFlowFctn_for_each_packet) {
+	if(plugin->pluginPtr == NULL)
+	  break;
+	else if((plugin->plugin_used == 1)
+		&& (plugin->pluginPtr->packetFlowFctn != NULL)
+		&& plugin->pluginPtr->call_packetFlowFctn_for_each_packet) {
 	  plugin->pluginPtr->packetFlowFctn(0 /* existing flow */,
+					    packet_if_idx,
 					    plugin->pluginData,
 					    bkt, direction,
-					    proto, isFragment,
-					    numPkts, tos,
+					    ip_offset, proto, isFragment,
+					    numPkts, tos, retransmitted_pkt,
 					    vlanId, ehdr,
 					    src, sport,
 					    dst, dport,
 					    len, flags, tcpSeqNum, icmpType,
 					    numMplsLabels,
-					    mplsLabels, 
+					    mplsLabels,
 					    h, p, payload, payloadLen);
 	}
+
+	/*
+	  We stop as soon as we have found a plugin that matches this flow
+
+	  Remove the statement below for having multi-plugin matching
+	 */
+	if(bkt->ext->plugin != NULL)
+	  break;
 
 	plugin = plugin->next;
       }
@@ -344,14 +455,17 @@ void pluginCallback(u_char callbackType, FlowHashBucket* bkt,
 
 /* *********************************************** */
 
-V9V10TemplateElementId* getPluginTemplate(char* template_name) {
+V9V10TemplateElementId* getPluginTemplate(char* template_name, PluginEntryPoint **plugin) {
   int i=0;
 
-  while(all_plugins[i] != NULL) {
-    if(all_plugins[i]->getPluginTemplateFctn != NULL) {
-      V9V10TemplateElementId *rc = all_plugins[i]->getPluginTemplateFctn(template_name);
+  while(readOnlyGlobals.all_plugins[i] != NULL) {
+    if(readOnlyGlobals.all_plugins[i]->getTemplateFctn != NULL) {
+      V9V10TemplateElementId *rc = readOnlyGlobals.all_plugins[i]->getTemplateFctn(template_name);
 
-      if(rc != NULL) return(rc);
+      if(rc != NULL) {
+	*plugin = readOnlyGlobals.all_plugins[i];
+	return(rc);
+      }
     }
 
     i++;
@@ -362,20 +476,42 @@ V9V10TemplateElementId* getPluginTemplate(char* template_name) {
 
 /* *********************************************** */
 
+char* expandPluginTemplate(char** template_name) {
+  int i=0;
+
+  while(readOnlyGlobals.all_plugins[i] != NULL) {
+    if(readOnlyGlobals.all_plugins[i]->templateShortcut != NULL) {
+      char *rc = readOnlyGlobals.all_plugins[i]->templateShortcut(*template_name);
+
+      if(rc != NULL) {
+	*template_name = rc;
+	return(rc);
+      }
+    }
+
+    i++;
+  }
+
+  return(*template_name);
+}
+
+/* *********************************************** */
+
 int checkPluginExport(V9V10TemplateElementId *theTemplate, /* Template being export */
 		      FlowDirection direction,             /* 0 = src->dst, 1 = dst->src   */
 		      FlowHashBucket *bkt,       /* The flow bucket being export */
 		      char *outBuffer,           /* Buffer where data will be exported */
 		      uint *outBufferBegin,      /* Index of the slot (0..outBufferMax) where data will be insert */
-		      uint *outBufferMax         /* Length of outBuffer */
-		      ) {
-  if(bkt->plugin != NULL) {
-    PluginInformation *plugin = bkt->plugin;
+		      uint *outBufferMax         /* Length of outBuffer */) {
+  if(bkt->ext && bkt->ext->plugin) {
+    PluginInformation *plugin = bkt->ext->plugin;
 
     while(plugin != NULL) {
-      if(plugin->pluginPtr->checkPluginExportFctn != NULL) {
-	int rc = plugin->pluginPtr->checkPluginExportFctn(plugin->pluginData, theTemplate, direction, bkt,
-							  outBuffer, outBufferBegin, outBufferMax);
+      if(plugin->pluginPtr == NULL)
+	break;
+      else if(plugin->pluginPtr->pluginExportFctn != NULL) {
+	int rc = plugin->pluginPtr->pluginExportFctn(plugin->pluginData, theTemplate, direction, bkt,
+						     outBuffer, outBufferBegin, outBufferMax);
 
 	if(rc == 0) return(0);
       }
@@ -389,17 +525,46 @@ int checkPluginExport(V9V10TemplateElementId *theTemplate, /* Template being exp
 
 /* *********************************************** */
 
-int checkPluginPrint(V9V10TemplateElementId *theTemplate, 
+int checkPluginPrint(V9V10TemplateElementId *theTemplate,
 		     FlowDirection direction,
-		     FlowHashBucket *bkt, char *line_buffer, uint line_buffer_len) {
-  if(bkt->plugin != NULL) {
-    PluginInformation *plugin = bkt->plugin;
+		     FlowHashBucket *bkt, char *line_buffer, uint line_buffer_len,
+		     u_int8_t json_mode) {
+  if(bkt->ext->plugin != NULL) {
+    PluginInformation *plugin = bkt->ext->plugin;
 
     while(plugin != NULL) {
-      if(plugin->pluginPtr->checkPluginPrintFctn != NULL) {
-	int rc = plugin->pluginPtr->checkPluginPrintFctn(plugin->pluginData, theTemplate,
-							 direction, bkt, line_buffer, line_buffer_len);
-	if(rc == 0) return(0);
+      if(plugin->pluginPtr == NULL)
+	break;
+      else if(plugin->pluginPtr->pluginPrintFctn != NULL) {
+	u_int8_t is_string = 0;
+	int rc = plugin->pluginPtr->pluginPrintFctn(plugin->pluginData, theTemplate,
+						    direction, bkt,
+						    line_buffer, line_buffer_len,
+						    json_mode, &is_string);
+
+	if(rc >= 0) {
+	  if(json_mode && is_string) {
+	    /* We need to escape the value */
+	    char out_buffer[1024];
+	    int i, out = 0;
+
+	    if(line_buffer[0] != '\"') out_buffer[out++] = '"';
+
+	    for(i=0; i<rc; i++) {
+	      if(line_buffer[i] == '"') {
+		out_buffer[out++] = '\\';
+		out_buffer[out++] = '"';
+	      } else
+		out_buffer[out++] = line_buffer[i];
+	    }
+
+	    if(line_buffer[0] != '\"') out_buffer[out++] = '"';
+	    out_buffer[out] = '\0';
+
+	    rc = snprintf(line_buffer, line_buffer_len, "%s", out_buffer);
+	  }
+	  return(rc);
+	}
       }
 
       plugin = plugin->next;
@@ -413,14 +578,14 @@ int checkPluginPrint(V9V10TemplateElementId *theTemplate,
 
 static void loadPlugin(char *dirName, char *pluginName) {
   char pluginPath[256];
-  PluginInfo* pluginInfo;
+  PluginEntryPoint* pluginInfo;
 #ifndef MAKE_STATIC_PLUGINS
 #ifndef WIN32
   void *pluginPtr = NULL;
   void *pluginEntryFctnPtr;
-  PluginInfo* (*pluginJumpFunc)(void);
+  PluginEntryPoint* (*pluginJumpFunc)(void);
 #endif
-#endif    
+#endif
   int i;
 
   snprintf(pluginPath, sizeof(pluginPath), "%s/%s", dirName != NULL ? dirName : ".", pluginName);
@@ -448,27 +613,44 @@ static void loadPlugin(char *dirName, char *pluginName) {
     return;
   }
 
-  pluginJumpFunc = (PluginInfo*(*)(void))pluginEntryFctnPtr;
+  pluginJumpFunc = (PluginEntryPoint*(*)(void))pluginEntryFctnPtr;
   pluginInfo = pluginJumpFunc();
 #else /* MAKE_STATIC_PLUGINS */
-
   if(strcmp(pluginName, "sipPlugin") == 0)
     pluginInfo = sipPluginEntryFctn();
   else if(strcmp(pluginName, "rtpPlugin") == 0)
     pluginInfo = rtpPluginEntryFctn();
-  else if(strcmp(pluginName, "dumpPlugin") == 0)
-    pluginInfo = dumpPluginEntryFctn();
   else if(strcmp(pluginName, "httpPlugin") == 0)
     pluginInfo = httpPluginEntryFctn();
   else if(strcmp(pluginName, "smtpPlugin") == 0)
     pluginInfo = smtpPluginEntryFctn();
   else if(strcmp(pluginName, "dbPlugin") == 0)
     pluginInfo = dbPluginEntryFctn();
- else if(strcmp(pluginName, "bgpPlugin") == 0)
+  else if(strcmp(pluginName, "bgpPlugin") == 0)
     pluginInfo = bgpPluginEntryFctn();
- else if(strcmp(pluginName, "mysqlPlugin") == 0)
+  else if(strcmp(pluginName, "nflitePlugin") == 0)
+    pluginInfo = nflitePluginEntryFctn();
+  else if(strcmp(pluginName, "dnsPlugin") == 0)
+    pluginInfo = dnsPluginEntryFctn();
+  else if(strcmp(pluginName, "mysqlPlugin") == 0)
     pluginInfo = mysqlPluginEntryFctn();
-#ifdef WIN32
+  else if(strcmp(pluginName, "gtpv0Plugin") == 0)
+    pluginInfo = gtpv0PluginEntryFctn();
+  else if(strcmp(pluginName, "gtpv1Plugin") == 0)
+    pluginInfo = gtpv1PluginEntryFctn();
+  else if(strcmp(pluginName, "gtpv2Plugin") == 0)
+    pluginInfo = gtpv2PluginEntryFctn();
+  else if(strcmp(pluginName, "radiusPlugin") == 0)
+    pluginInfo = radiusPluginEntryFctn();
+  else if(strcmp(pluginName, "dhcpPlugin") == 0)
+    pluginInfo = dhcpPluginEntryFctn();
+  else if(strcmp(pluginName, "oraclePlugin") == 0)
+    pluginInfo = oraclePluginEntryFctn();
+#ifdef HAVE_PF_RING
+  else if(strcmp(pluginName, "l7BridgePlugin") == 0)
+    pluginInfo = l7BridgePluginEntryFctn();
+#endif
+#ifndef WIN32
   else if(strcmp(pluginName, "processPlugin") == 0)
     pluginInfo = processPluginEntryFctn();
 #endif
@@ -478,32 +660,89 @@ static void loadPlugin(char *dirName, char *pluginName) {
   }
 
 #endif /* MAKE_STATIC_PLUGINS */
-  
+
   if(pluginInfo != NULL) {
     if(strcmp(pluginInfo->nprobe_revision, nprobe_revision)) {
-      traceEvent(TRACE_WARNING, "Plugin %s (%s/%s) version mismatch [loaded=%s][expected=%s]: discarded",
+      traceEvent(TRACE_WARNING, "Plugin %s (%s/%s) version mismatch [loaded=%s][expected=%s]: %s",
 		 pluginInfo->name, dirName, pluginName,
-		 pluginInfo->nprobe_revision, nprobe_revision);
-      return;
+		 pluginInfo->nprobe_revision, nprobe_revision,
+		 readOnlyGlobals.ignore_plugin_revision_mismatch ? "ignored" : "discarded");
+      if(!readOnlyGlobals.ignore_plugin_revision_mismatch)
+        return;
     }
 
-    if(plugin_sanity_check(pluginInfo->name, pluginInfo->pluginFlowConf(), 
+    if(plugin_sanity_check(pluginInfo->name, pluginInfo->pluginFlowConf(),
 			   "standard templates", ver9_templates) == -1) {
       traceEvent(TRACE_WARNING, "Plugin %s/%s will be ignored", dirName, pluginName);
-    } else {    
+    } else {
       int rc = 0;
-      
-      for(i=0; i<num_plugins; i++) {
-	rc = plugin_sanity_check(pluginInfo->name, pluginInfo->pluginFlowConf(), 
-				 all_plugins[i]->name, all_plugins[i]->pluginFlowConf());
+
+      for(i=0; i<readOnlyGlobals.num_plugins; i++) {
+	rc = plugin_sanity_check(pluginInfo->name, pluginInfo->pluginFlowConf(),
+				 readOnlyGlobals.all_plugins[i]->name,
+				 readOnlyGlobals.all_plugins[i]->pluginFlowConf());
 	if(rc != 0) break;
       }
 
+
       if(rc == 0) {
-	if(pluginInfo != NULL)
-	  all_plugins[num_plugins++] = pluginInfo; /* FIX : add PluginInfo to the list */
+#if defined(HAVE_PLUGIN_LICENSE)
+        if((!readOnlyGlobals.demo_mode) && (!readOnlyGlobals.help_mode)) {
+          if(pluginInfo->need_license == PLUGIN_NEED_LICENSE) {
+            char out_buf[512], license_path[256], *sysId = getSystemId();
+            time_t until_then;
+
+	    pluginInfo->pro_version = 0; /* Default */
+
+            snprintf(license_path, sizeof(license_path), "%s%s.%s",
+#ifndef WIN32
+                     "/etc/",
+#else
+                     "",
+#endif
+                     LICENSE_FILE_NAME,
+                     pluginInfo->family ? pluginInfo->family : pluginInfo->short_name);
+
+            if(verify_license(version, pluginInfo->family ? pluginInfo->family : pluginInfo->short_name,
+                              sysId, license_path, 5, out_buf, sizeof(out_buf), &until_then) != 0) {
+	      /* Last resort: let's check the pro version */
+
+	      if(pluginInfo->pro_family) {
+		snprintf(license_path, sizeof(license_path), "%s%s.%s",
+#ifndef WIN32
+			 "/etc/",
+#else
+			 "",
+#endif
+			 LICENSE_FILE_NAME, pluginInfo->pro_family);
+
+		if(verify_license(version, pluginInfo->pro_family,
+				  sysId, license_path, 5, out_buf, sizeof(out_buf), &until_then) != 0) {
+		  goto no_plugin_license;		  
+		} else
+		  pluginInfo->pro_version = 1;
+	      } else {
+	      no_plugin_license:
+		traceEvent(TRACE_NORMAL, "Unable to enable plugin %s: missing license [%s]",
+			   pluginInfo->name, license_path);
+		pluginInfo = NULL;
+	      }
+            }
+
+            free(sysId);
+          }
+        }
+#endif /* HAVE_PLUGIN_LICENSE */
+
+        if(pluginInfo != NULL) {
+#if !defined(WIN32) && !defined(MAKE_STATIC_PLUGINS)
+          readOnlyGlobals.pluginDlopenHandle[readOnlyGlobals.num_plugins] = pluginPtr;
+#endif
+          readOnlyGlobals.all_plugins[readOnlyGlobals.num_plugins] = pluginInfo; /* FIX : add PluginEntryPoint to the list */
+          readOnlyGlobals.num_plugins++;
+        }
       } else {
-	traceEvent(TRACE_WARNING, "Plugin %s/%s will be ignored", dirName, pluginName);
+        traceEvent(TRACE_WARNING, "Plugin %s/%s will be ignored", dirName, pluginName);
       }
     }
   }
@@ -514,22 +753,35 @@ static void loadPlugin(char *dirName, char *pluginName) {
 void enablePlugins() {
   int i = 0, found = 0;
 
-  while(all_plugins[i] != NULL) {
-    if((readOnlyGlobals.stringTemplateV4 == NULL) 
+  while(readOnlyGlobals.all_plugins[i] != NULL) {
+    if((readOnlyGlobals.stringTemplateV4 == NULL)
        && (readOnlyGlobals.flowDumpFormat == NULL))
       found = 0;
     else {
-      if(all_plugins[i]->enabled && (!all_plugins[i]->always_enabled)) {
-	V9V10TemplateElementId *templates = all_plugins[i]->pluginFlowConf();
+      if(readOnlyGlobals.all_plugins[i]->enabled && (!readOnlyGlobals.all_plugins[i]->always_enabled)) {
+	V9V10TemplateElementId *templates = readOnlyGlobals.all_plugins[i]->pluginFlowConf();
 
 	found = 0;
 
-	if(templates && (templates[0].templateElementName != NULL)) {
+	if(templates && (templates[0].netflowElementName != NULL)) {
 	  int j = 0;
 
-	  while(templates[j].templateElementName != NULL) {
-	    if((readOnlyGlobals.stringTemplateV4 && (strstr(readOnlyGlobals.stringTemplateV4, templates[j].templateElementName)))
-	       || (readOnlyGlobals.flowDumpFormat && strstr(readOnlyGlobals.flowDumpFormat, templates[j].templateElementName))) {
+#if 0
+	  if(unlikely(readOnlyGlobals.enable_debug)) {
+	    for(j=0; templates[j].netflowElementName != NULL; j++)
+	      traceEvent(TRACE_NORMAL, "%s", templates[j].netflowElementName);
+
+	    j = 0;
+	  }
+#endif
+
+	  while(templates[j].netflowElementName != NULL) {
+	    if((!templates[j].isOptionTemplate)
+	       && (readOnlyGlobals.baseTemplateBufferV4
+		   && (((strstr(readOnlyGlobals.baseTemplateBufferV4, templates[j].netflowElementName) != NULL)
+		       || ((templates[j].ipfixElementName[0] != '\0') && strstr(readOnlyGlobals.baseTemplateBufferV4, templates[j].ipfixElementName)))
+		       || (readOnlyGlobals.flowDumpFormat && (strstr(readOnlyGlobals.flowDumpFormat, templates[j].netflowElementName)
+							      || ((templates[j].ipfixElementName[0] != '\0') && strstr(readOnlyGlobals.flowDumpFormat, templates[j].ipfixElementName))))))) {
 	      found = 1;
 	      break;
 	    }
@@ -540,15 +792,15 @@ void enablePlugins() {
       }
     }
 
-    if((!found) 
-       && (!all_plugins[i]->always_enabled)) {
+    if((!found)
+       && (!readOnlyGlobals.all_plugins[i]->always_enabled)) {
       traceEvent(TRACE_INFO, "Disabling plugin %s (no template is using it)",
-		 all_plugins[i]->name);
-      all_plugins[i]->enabled = 0;
+		 readOnlyGlobals.all_plugins[i]->name);
+      readOnlyGlobals.all_plugins[i]->enabled = 0;
     } else {
-      traceEvent(TRACE_NORMAL, "Enabling plugin %s", all_plugins[i]->name);
-      all_plugins[i]->enabled = 1;
-   }
+      traceEvent(TRACE_NORMAL, "Enabling plugin %s", readOnlyGlobals.all_plugins[i]->name);
+      readOnlyGlobals.all_plugins[i]->enabled = 1;
+    }
 
     i++;
   }
@@ -559,10 +811,10 @@ void enablePlugins() {
 void setupPlugins() {
   int i = 0;
 
-  while(all_plugins[i] != NULL) {
-    if(all_plugins[i]->enabled 
-       && (all_plugins[i]->setupFctn != NULL)) {
-      all_plugins[i]->setupFctn();
+  while(readOnlyGlobals.all_plugins[i] != NULL) {
+    if(readOnlyGlobals.all_plugins[i]->enabled
+       && (readOnlyGlobals.all_plugins[i]->setupFctn != NULL)) {
+      readOnlyGlobals.all_plugins[i]->setupFctn();
     }
     i++;
   }
@@ -572,45 +824,135 @@ void setupPlugins() {
 
 void buildActivePluginsList(V9V10TemplateElementId *template_element_list[]) {
   int plugin_idx = 0;
-  num_active_plugins = 0;
+  readOnlyGlobals.num_active_plugins = 0;
 
-  while(all_plugins[plugin_idx] != NULL) {
-    u_int8_t is_http = 0, is_dns = 0, is_mysql = 0;
+  while(readOnlyGlobals.all_plugins[plugin_idx] != NULL) {
+    u_int8_t is_http = 0, is_dns = 0, is_mysql = 0, is_sip = 0, is_oracle = 0,
+      is_gtp = 0, is_l7 = 0, is_radius = 0, is_imap = 0, is_smtp = 0, is_pop = 0,
+      is_diameter = 0, is_whois = 0, is_dhcp = 0, is_ftp = 0, is_process = 0;
 
-    traceEvent(TRACE_INFO, "Scanning plugin %s", all_plugins[plugin_idx]->name);
+    traceEvent(TRACE_INFO, "Scanning plugin %s", readOnlyGlobals.all_plugins[plugin_idx]->name);
 
-    if(strcasestr(all_plugins[plugin_idx]->name, "http")) {
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "http")) {
       is_http = 1;
       if(readOnlyGlobals.enableHttpPlugin)
-	all_plugins[plugin_idx]->always_enabled = 1;
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
     }
-    
-    if(strcasestr(all_plugins[plugin_idx]->name, "dns")) {
+
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "dns")) {
       is_dns = 1;
       if(readOnlyGlobals.enableDnsPlugin)
-	all_plugins[plugin_idx]->always_enabled = 1;
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
     }
 
-    if(strcasestr(all_plugins[plugin_idx]->name, "mysql")) {
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "gtp")) {
+      is_gtp = 1;
+      if(readOnlyGlobals.enableGtpPlugin)
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
+    }
+
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "radius")) {
+      is_radius = 1;
+      if(readOnlyGlobals.enableRadiusPlugin)
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
+    }
+
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "diameter")) {
+      is_diameter = 1;
+      if(readOnlyGlobals.enableDiameterPlugin)
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
+    }
+
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "smtp")) {
+      is_smtp = 1;
+      if(readOnlyGlobals.enableSmtpPlugin)
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
+    }
+
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "pop")) {
+      is_pop = 1;
+      if(readOnlyGlobals.enablePopPlugin)
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
+    }
+
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "imap")) {
+      is_imap = 1;
+      if(readOnlyGlobals.enableImapPlugin)
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
+    }
+
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "mysql")) {
       is_mysql = 1;
       if(readOnlyGlobals.enableMySQLPlugin)
-	all_plugins[plugin_idx]->always_enabled = 1;
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
     }
 
-    if(all_plugins[plugin_idx]->always_enabled) {
-      all_active_plugins[num_active_plugins++] = all_plugins[plugin_idx];
-    } else if(all_plugins[plugin_idx]->getPluginTemplateFctn != NULL) {
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "oracle")) {
+      is_oracle = 1;
+      if(readOnlyGlobals.enableOraclePlugin)
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
+    }
+
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "dhcp")) {
+      is_dhcp = 1;
+      if(readOnlyGlobals.enableDhcpPlugin)
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
+    }
+
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "ftp")) {
+      is_ftp = 1;
+      if(readOnlyGlobals.enableFtpPlugin)
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
+    }
+
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "sip")) {
+      is_sip = 1;
+      if(readOnlyGlobals.enableSipPlugin)
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
+    }
+
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "l7")) {
+      is_l7 = 1;
+      if(readOnlyGlobals.enableL7BridgePlugin)
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
+    }
+
+    if(strcasestr(readOnlyGlobals.all_plugins[plugin_idx]->name, "process")) {
+      is_process = 1;
+      if(readOnlyGlobals.enableProcessPlugin)
+	readOnlyGlobals.all_plugins[plugin_idx]->always_enabled = 1;
+    }
+
+    if(readOnlyGlobals.all_plugins[plugin_idx]->always_enabled) {
+      readOnlyGlobals.all_active_plugins[readOnlyGlobals.num_active_plugins++] = readOnlyGlobals.all_plugins[plugin_idx];
+    } else if(readOnlyGlobals.all_plugins[plugin_idx]->getTemplateFctn != NULL) {
       int j;
 
       j = 0;
       while(template_element_list[j] != NULL) {
-	if(all_plugins[plugin_idx]->getPluginTemplateFctn(template_element_list[j]->templateElementName)) {
-	  all_active_plugins[num_active_plugins++] = all_plugins[plugin_idx];
+	/* traceEvent(TRACE_INFO, "Searching for: %s", (char*)template_element_list[j]->netflowElementName); */
 
-	  if(is_dns) readOnlyGlobals.enableDnsPlugin = 1;
-	  else if(is_http)  readOnlyGlobals.enableHttpPlugin = 1;
-	  else if(is_mysql) readOnlyGlobals.enableMySQLPlugin = 1;
-	  traceEvent(TRACE_INFO, "Enabling plugin %s", all_plugins[plugin_idx]->name);
+	if(readOnlyGlobals.all_plugins[plugin_idx]->getTemplateFctn((char*)template_element_list[j]->netflowElementName)) {
+	  readOnlyGlobals.all_active_plugins[readOnlyGlobals.num_active_plugins++] = readOnlyGlobals.all_plugins[plugin_idx];
+
+	  if(is_dns)           readOnlyGlobals.enableDnsPlugin = 1;
+	  else if(is_gtp)      readOnlyGlobals.enableGtpPlugin = 1;
+	  else if(is_radius)   readOnlyGlobals.enableRadiusPlugin = 1;
+	  else if(is_diameter) readOnlyGlobals.enableDiameterPlugin = 1;
+	  else if(is_http)     readOnlyGlobals.enableHttpPlugin = 1;
+	  else if(is_l7)       readOnlyGlobals.enableL7BridgePlugin = 1;
+	  else if(is_mysql)    readOnlyGlobals.enableMySQLPlugin = 1;
+	  else if(is_oracle)   readOnlyGlobals.enableOraclePlugin = 1;
+	  else if(is_whois)    readOnlyGlobals.enableWhoisPlugin = 1;
+	  else if(is_dhcp)     readOnlyGlobals.enableDhcpPlugin = 1;
+	  else if(is_ftp)      readOnlyGlobals.enableFtpPlugin = 1;
+	  else if(is_process)  readOnlyGlobals.enableProcessPlugin = 1;
+	  else if(is_sip)      readOnlyGlobals.enableSipPlugin = 1;
+	  else if(is_smtp)     readOnlyGlobals.enableSmtpPlugin = 1;
+	  else if(is_imap)     readOnlyGlobals.enableImapPlugin = 1;
+	  else if(is_pop)      readOnlyGlobals.enablePopPlugin = 1;
+
+	  traceEvent(TRACE_INFO, "Enabling plugin %s", readOnlyGlobals.all_plugins[plugin_idx]->name);
 	  break;
 	}
 
@@ -621,8 +963,9 @@ void buildActivePluginsList(V9V10TemplateElementId *template_element_list[]) {
     plugin_idx++;
   }
 
-  all_active_plugins[num_active_plugins] = NULL;
-  traceEvent(TRACE_NORMAL, "%d plugin(s) enabled", num_active_plugins);
+  readOnlyGlobals.all_active_plugins[readOnlyGlobals.num_active_plugins] = NULL;
+
+  traceEvent(TRACE_NORMAL, "%d plugin(s) enabled", readOnlyGlobals.num_active_plugins);
 }
 
 /* ******************************************** */
@@ -642,7 +985,7 @@ char* dumpformat2ascii(ElementDumpFormat fileDumpFormat) {
   case dump_as_hex:            return("hex");
   case dump_as_ascii:          return("ascii");
   default:                     return("hex"); /* It should not happen ! */
-  } 
+  }
 }
 
 /* ******************************************** */
@@ -650,11 +993,12 @@ char* dumpformat2ascii(ElementDumpFormat fileDumpFormat) {
 static void printTemplateMetadata(FILE *file, V9V10TemplateElementId *templates) {
   int j = 0;
 
-  while(templates[j].templateElementName != NULL) {
+  while(templates[j].netflowElementName != NULL) {
     if((!templates[j].isOptionTemplate)
-       && (templates[j].templateElementId < 0xA0))
+       // && (templates[j].templateElementId < 0xA0)
+       )
       fprintf(file, "%s\t%d\t%s\t%s\n",
-	      templates[j].templateElementName,
+	      templates[j].netflowElementName,
 	      templates[j].templateElementId,
 	      dumpformat2ascii(templates[j].fileDumpFormat),
 	      templates[j].templateElementDescr);
@@ -676,7 +1020,7 @@ void printMetadata(FILE *file) {
 	  version, nprobe_revision, osName,
 	  ctime(&now));
 
-  fprintf(file, 
+  fprintf(file,
 	  "#\n"
 	  "# Name\tId\tFormat\tDescription\n"
 	  "#\n"
@@ -699,13 +1043,25 @@ void printMetadata(FILE *file) {
 
   printTemplateMetadata(file, ver9_templates);
 
-  while(all_plugins[i] != NULL) {
-    V9V10TemplateElementId *templates = all_plugins[i]->pluginFlowConf();
+  while(readOnlyGlobals.all_plugins[i] != NULL) {
+    V9V10TemplateElementId *templates = readOnlyGlobals.all_plugins[i]->pluginFlowConf();
 
-    if(templates && (templates[0].templateElementName != NULL))
+    if(templates && (templates[0].netflowElementName != NULL))
       printTemplateMetadata(file, templates);
-    
+
     i++;
   }
 }
 
+/* ******************************************** */
+
+void pluginIdleThreadTask(void) {
+  int i = 0;
+
+  while(readOnlyGlobals.all_active_plugins[i] != NULL) {
+    if(readOnlyGlobals.all_active_plugins[i]->idleFctn != NULL)
+      readOnlyGlobals.all_active_plugins[i]->idleFctn();
+
+    i++;
+  }
+}

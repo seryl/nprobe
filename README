@@ -4,12 +4,16 @@ Introduction
 nprobe is a software NetFlow v5/v9/IPFIX and nFlow probe that allows to turn a PC into a NetFlow probe.
 It has been designed to be compact, easy to embed, an memory/CPU savvy.
 
+Mandatory Packages (Ubuntu/Debian)
+==================================
+In order to compile nProbe on Linux you need some mandatory packages/tools. Below we list those
+needed on Ubuntu/Debian platforms
+
+# apt-get install build-essential bison flex linux-headers-$(uname -r) libtool automake autoconf subversion libpcap-dev wget
 
 Build Steps
 ===========
-(cd plugins && ./buildMakrFile.sh > Makefile.in)
 ./autogen.sh
-./configure
 make
 sudo make install
 
@@ -30,6 +34,10 @@ IPFIX
 ========
 In order to enable IPFIX it is necessary to specify -T (as for NetFlowV9) and -V 10.
 
+Example of Collection Filtering
+=============================
+nprobe -b 2 -n none -3 2055 -i none --collection-filter as1235 --collection-filter "\!as1234" --collection-filter "\!192.168.0.1/24"
+
 =======================================
 
-Copyright (C) 2002-2010 - Luca Deri <deri@ntop.org>
+Copyright (C) 2002-14 - Luca Deri <deri@ntop.org>

@@ -1,0 +1,164 @@
+Summary: network probe
+Name: nprobe
+Version: @PACKAGE_VERSION@
+Release: %{buildnumber}
+License: GPL
+Group: Networking/Utilities
+URL: http://www.ntop.org/nProbe.html
+Source: nprobe-%{version}.tgz
+Packager: Luca Deri <deri@ntop.org>
+# Temporary location where the RPM will be built
+BuildRoot:  %{_tmppath}/%{name}-%{version}-root
+Requires: pfring = @PFRING_VERSION@-@PFRING_SVN_RELEASE@ glibc >= 2.3.4 @MYSQL_DEP@ @GEOIP_DEP@ @REDIS_DEP@ mysql mysql-libs hiredis redis zeromq3 numactl coreutils
+
+%description
+nprobe is a software NetFlow v5/v9/IPFIX and nFlow probe that allows to turn
+a PC into a NetFlow probe. It has been designed to be compact, easy to
+embed, an memory/CPU savvy.
+
+
+## DEV PACKAGE
+%package dev
+Summary: Header files and development libraries for %{name}
+Group: Development/Libraries
+Requires: %{name} = %{version}-%{release}
+
+%description dev
+This package contains the header files and development libraries
+for %{name}. If you like to develop programs using %{name},
+you will need to install %{name}-dev.
+
+
+%prep
+
+%setup -q
+
+%post
+chkconfig --add nprobe
+
+%build
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+if [ -x ./configure ]; then
+  #CFLAGS="$RPM_OPT_FLAGS"
+  ./configure
+else
+  #CFLAGS="$RPM_OPT_FLAGS" 
+  ./autogen.sh
+fi
+make
+cd ..
+#
+
+# Installation may be a matter of running an install make target or you
+# may need to manually install files with the install command.
+
+%define includedir    /usr/local/include/nprobe
+%define libdir        /usr/local/lib
+
+%install
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+if [ -d $RPM_BUILD_ROOT ]; then
+	\rm -rf $RPM_BUILD_ROOT
+fi
+make DESTDIR=$RPM_BUILD_ROOT install
+mkdir -p $RPM_BUILD_ROOT/usr/local/share/nprobe
+cp Changelog $RPM_BUILD_ROOT/usr/local/share/nprobe
+mkdir -p $RPM_BUILD_ROOT/usr/local/etc/nprobe
+cp EULA.txt $RPM_BUILD_ROOT/usr/local/etc/nprobe
+
+mkdir -p $RPM_BUILD_ROOT/etc/init $RPM_BUILD_ROOT/etc/ld.so.conf.d $RPM_BUILD_ROOT/etc/init.d $RPM_BUILD_ROOT/etc/logrotate.d
+cp $HOME/nProbe/packages/etc/init/nprobe.conf         $RPM_BUILD_ROOT/etc/init
+cp $HOME/nProbe/packages/etc/ld.so.conf.d/nprobe.conf $RPM_BUILD_ROOT/etc/ld.so.conf.d
+cp $HOME/nProbe/packages/etc/init.d/nprobe            $RPM_BUILD_ROOT/etc/init.d
+cp $HOME/nProbe/packages/etc/logrotate.d/nprobe	      $RPM_BUILD_ROOT/etc/logrotate.d
+strip $RPM_BUILD_ROOT/usr/local/bin/*
+
+#cp EULA.txt *.dat.gz $RPM_BUILD_ROOT/usr/local/etc/nprobe
+# Dependencies that we need to include as there is no package
+# we can use unfortunaltely
+#cp /usr/local/lib/libGeoIP.so.1 $RPM_BUILD_ROOT/usr/local/lib
+
+#if test "@BITS@" = "64"; then
+#   mkdir -p $RPM_BUILD_ROOT/usr/lib64
+#   cp @GEOIP_LIB@ $RPM_BUILD_ROOT/usr/lib64
+#fi
+#
+##INSTALL DEV FILES
+mkdir -p                                             %{buildroot}%{includedir}/pro
+cp  $HOME/nProbe/*.h                                 %{buildroot}%{includedir}/
+cp  $HOME/nProbe/plugins/*.h $HOME/nProbe/patricia.h %{buildroot}%{includedir}/
+cp  $HOME/nProbe/pro/*.h                             %{buildroot}%{includedir}/pro/
+cp -r $HOME/nProbe/nDPI/src/include                  %{buildroot}%{includedir}/ndpi
+# Remove reference to ndpi_win32.h
+sed -i -e "s/#include \"ndpi_win32.h\"//g"           %{buildroot}%{includedir}/ndpi/ndpi_main.h
+cp  $HOME/nProbe/nDPI/src/lib/.libs/libndpi.a        %{buildroot}%{includedir}/ndpi
+grep -v HAVE_VOIP_EXTENSIONS %{buildroot}%{includedir}/config.h > %{buildroot}%{includedir}/nprobe-config.h
+sed -i "s/#include \"config\.h\"/#include \"nprobe-config.h\"/g" %{buildroot}%{includedir}/nprobe.h
+rm -fr %{buildroot}%{includedir}/ndpi/.svn %{buildroot}%{includedir}/ndpi/Makefile*  %{buildroot}%{includedir}/ndpi/ndpi_win32.h
+
+### Cleanup
+rm -f $RPM_BUILD_ROOT/usr/local/lib/nprobe/plugins/lib*n.so
+rm -f $RPM_BUILD_ROOT/usr/local/lib/nprobe/plugins/lib*n.la
+rm -f $RPM_BUILD_ROOT/usr/local/lib/nprobe/plugins/lib*n.a
+rm -f $RPM_BUILD_ROOT/usr/local/lib/libnprobe.so
+## Remove unneeded dev files ##
+rm -f $RPM_BUILD_ROOT/usr/local/lib/libnprobe.la
+rm -f $RPM_BUILD_ROOT/usr/local/include/nprobe/hep.h
+## End ## 
+#
+DST=$RPM_BUILD_ROOT/usr/local/nprobe
+SRC=$RPM_BUILD_DIR/%{name}-%{version}
+mkdir -p $DST/conf
+
+# Clean out our build directory
+%clean
+rm -fr $RPM_BUILD_ROOT
+
+%files
+/usr/local/bin/nprobe
+/usr/local/lib/libnprobe-@PACKAGE_VERSION@.so
+#/usr/local/etc/nprobe/GeoIPASNum.dat.gz
+#/usr/local/etc/nprobe/GeoIPASNumv6.dat.gz
+#/usr/local/etc/nprobe/GeoLiteCity.dat.gz
+#/usr/local/etc/nprobe/GeoLiteCityv6.dat.gz
+#@GEOIP_LIB@
+/usr/local/etc/nprobe/EULA.txt
+/usr/local/lib/nprobe/plugins/librtpPlugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libsipPlugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libdbPlugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libbgpPlugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libsmtpPlugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libhttpPlugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libnflitePlugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libmysqlPlugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libdnsPlugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libprocessPlugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libl7BridgePlugin-@PACKAGE_VERSION@.so
+# Telco mode
+/usr/local/lib/nprobe/plugins/libradiusPlugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libgtpv0Plugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libgtpv1Plugin-@PACKAGE_VERSION@.so
+/usr/local/lib/nprobe/plugins/libgtpv2Plugin-@PACKAGE_VERSION@.so
+/etc/init/nprobe.conf
+/etc/ld.so.conf.d/nprobe.conf
+/etc/init.d/nprobe
+/etc/logrotate.d/nprobe
+/usr/local/share/nprobe/Changelog
+
+# Set the default attributes of all of the files specified to have an
+# owner and group of root and to inherit the permissions of the file
+# itself.
+%defattr(-, root, root)
+
+%files dev
+%defattr(-,root,root,-)
+
+%{includedir}
+
+%{libdir}/libnprobe.a
+
+%changelog
+* Tue Jul 31 2012 Luca Deri <deri@ntop.org> 6.7
+- Current package version
+

@@ -1,7 +1,7 @@
 /*
  *        nProbe - a Netflow v5/v9/IPFIX probe for IPv4/v6
  *
- *       Copyright (C) 2002-11 Luca Deri <deri@ntop.org>
+ *       Copyright (C) 2002-14 Luca Deri <deri@ntop.org>
  *
  *                     http://www.ntop.org/
  *
@@ -22,16 +22,35 @@
 
 #include "nprobe.h"
 
+#ifdef FREEBSD
+#include <pthread_np.h>
+
+typedef cpuset_t cpu_set_t;
+#endif
+
+
+#ifdef __NetBSD__
+#include <pthread.h>
+#include <sched.h>
+#endif
+
+
 #ifdef sun
 extern char *strtok_r(char *, const char *, char **);
 #endif
 
 #ifdef WIN32
-#define strtok_r(a, b, c) strtok(a, b)
+//#define strtok_r(a, b, c) strtok(a, b)
 #endif
 
 #ifdef HAVE_SQLITE
 extern void sqlite_exec_sql(char* sql);
+#endif
+
+#ifdef HAVE_GEOIP
+#define GEOIP_DIR_LOCAL_TEMPLATE "%s"
+#define GEOIP_DIR_SYSTEM_TEMPLATE PREFIX "/nprobe/%s"
+#define GEOIP_DIR_NTOPNG "/usr/share/ntopng/httpdocs/geoip/%s"
 #endif
 
 static u_int8_t getIfIdx(struct in_addr *addr, u_int16_t *interface_id);
@@ -40,10 +59,6 @@ static u_int8_t getIfIdx(struct in_addr *addr, u_int16_t *interface_id);
 
 static char *port_mapping[0xFFFF] = { NULL };
 static char *proto_mapping[0xFF] = { NULL };
-
-/* ********************** */
-
-#define CUSTOM_FIELD_LEN  16
 
 /* ************************************ */
 
@@ -76,7 +91,7 @@ void traceEvent(const int eventTraceLevel, const char* file,
 
     while(buf[strlen(buf)-1] == '\n') buf[strlen(buf)-1] = '\0';
 
-    snprintf(out_buf, sizeof(out_buf), "%s [%s:%d] %s%s", theDate,
+    snprintf(out_buf, sizeof(out_buf)-1, "%s [%s:%d] %s%s", theDate,
 #ifdef WIN32
 	     strrchr(file, '\\')+1,
 #else
@@ -139,17 +154,7 @@ void initWinsock32() {
 
 /* ******************************** */
 
-short isWinNT() {
-  DWORD dwVersion;
-  DWORD dwWindowsMajorVersion;
-
-  dwVersion=GetVersion();
-  dwWindowsMajorVersion =  (DWORD)(LOBYTE(LOWORD(dwVersion)));
-  if(!(dwVersion >= 0x80000000 && dwWindowsMajorVersion >= 4))
-    return 1;
-  else
-    return 0;
-}
+short isWinNT() { return(1); }
 
 /* ****************************************************** */
 /*
@@ -167,17 +172,19 @@ short isWinNT() {
 
 /* ******************************************************************* */
 
-u_int8_t ip2mask(IpAddress ip) {
-  if((readOnlyGlobals.numInterfaceNetworks == 0) || (ip.ipVersion != 4))
+u_int8_t ip2mask(IpAddress *addr, HostInfo *ip) {
+  if(ip->mask != 0) return(ip->mask);
+  else if((readOnlyGlobals.numInterfaceNetworks == 0) || (addr->ipVersion != 4))
     return(0);
   else {
     int i;
-    u_int32_t addr = htonl(ip.ipType.ipv4);
+    u_int32_t address = htonl(addr->ipType.ipv4);
 
     for(i=0; i<readOnlyGlobals.numInterfaceNetworks; i++) {
-      if((addr & readOnlyGlobals.interfaceNetworks[i].netmask) == readOnlyGlobals.interfaceNetworks[i].network) {
+      if((address & readOnlyGlobals.interfaceNetworks[i].netmask) == readOnlyGlobals.interfaceNetworks[i].network) {
 	// traceEvent(TRACE_INFO, "--> %d", readOnlyGlobals.interfaceNetworks[i].netmask_v6);
-	return(readOnlyGlobals.interfaceNetworks[i].netmask_v6);
+	ip->mask = readOnlyGlobals.interfaceNetworks[i].netmask_v6;
+	return(ip->mask);
       }
     }
   }
@@ -195,7 +202,6 @@ void initAS() {
   _fillASinfo = NULL;
 }
 
-
 void setIp2AS(ip_to_AS ptr) {
   _ip_to_AS = ptr;
 }
@@ -211,40 +217,39 @@ void fillASInfo(FlowHashBucket *bkt) {
 
 /* ******************************************************************* */
 
-static u_int32_t _ip2AS(IpAddress ip) {
+static u_int32_t _ip2AS(IpAddress *ip) {
+  char *rsp = NULL;
+  u_int32_t as;
 
-  if((!readWriteGlobals->shutdownInProgress) && (_ip_to_AS != NULL)) {
-    return(_ip_to_AS(ip));
-  }
+  if((!readWriteGlobals->shutdownInProgress) && (_ip_to_AS != NULL))
+    return(_ip_to_AS(*ip));
 
 #ifdef HAVE_GEOIP
-  if((readOnlyGlobals.geo_ip_asn_db == NULL)
+  if(readOnlyGlobals.geo_ip_asn_db == NULL) return(0);
+
+
 #ifdef WIN32
-     || (ip.ipVersion == 6)
+  if(ip.ipVersion == 6) return(0);
 #endif
-     )
-    return(0);
+
+  pthread_rwlock_wrlock(&readWriteGlobals->geoipRwLock);
+  if(ip->ipVersion == 4)
+    rsp = GeoIP_name_by_ipnum(readOnlyGlobals.geo_ip_asn_db, ip->ipType.ipv4);
   else {
-    char *rsp = NULL;
-    u_int32_t as;
-
-    pthread_rwlock_wrlock(&readWriteGlobals->geoipRwLock);
-    if(ip.ipVersion == 4)
-      rsp = GeoIP_name_by_ipnum(readOnlyGlobals.geo_ip_asn_db, ip.ipType.ipv4);
-    else {
-#ifdef INET6
+#ifdef HAVE_GEOIP_IPv6
 #ifndef WIN32
-      rsp = GeoIP_name_by_ipnum_v6(readOnlyGlobals.geo_ip_asn_db, ip.ipType.ipv6);
+    /* Invalid database type GeoIP ASNum Edition, expected GeoIP Organization Edition */
+    if(readOnlyGlobals.geo_ip_asn_db_v6)
+      rsp = GeoIP_name_by_ipnum_v6(readOnlyGlobals.geo_ip_asn_db_v6, ip->ipType.ipv6);
 #endif
 #endif
-    }
-    pthread_rwlock_unlock(&readWriteGlobals->geoipRwLock);
-
-    as = rsp ? atoi(&rsp[2]) : 0;
-    free(rsp);
-    /* traceEvent(TRACE_WARNING, "--> %s (%d)", rsp, as); */
-    return(as);
   }
+  pthread_rwlock_unlock(&readWriteGlobals->geoipRwLock);
+
+  as = rsp ? atoi(&rsp[2]) : 0;
+  free(rsp);
+  /* traceEvent(TRACE_WARNING, "--> %s (%d)", rsp, as); */
+  return(as);
 #else
   return(0);
 #endif
@@ -252,27 +257,22 @@ static u_int32_t _ip2AS(IpAddress ip) {
 
 /* ************************************* */
 
-u_int32_t _getAS(HostHashBucket *bkt) {
-  u_int32_t ret;
-
+u_int32_t _getAS(IpAddress *addr, HostInfo *bkt) {
   if(bkt->aspath && (bkt->aspath_len > 0)) {
     /* The last element is the host AS, the first one is our AS */
-    ret = bkt->aspath[bkt->aspath_len-1];
+    bkt->asn = bkt->aspath[bkt->aspath_len-1];
   } else
-    ret = _ip2AS(bkt->host);
+    bkt->asn = _ip2AS(addr);
 
   /* traceEvent(TRACE_WARNING, "--> %u", ret);  */
 
-  return(ret);
+  return(bkt->asn);
 }
 
 /* ************************************ */
 
-u_int32_t getAS(FlowHashBucket *bkt, u_int8_t src_host) {
-  if(src_host)
-    return((bkt->src_as != 0) ? bkt->src_as : _getAS(bkt->src));
-  else
-    return((bkt->dst_as != 0) ? bkt->dst_as : _getAS(bkt->dst));
+u_int32_t getAS(IpAddress *addr, HostInfo *bkt) {
+  return((bkt->asn != 0) ? bkt->asn : _getAS(addr, bkt));
 }
 
 /* ************************************ */
@@ -286,14 +286,27 @@ void readASs(char *path) {
     char the_path[256];
 
     if(stat(path, &stats) == 0)
-      snprintf(the_path, sizeof(the_path), "%s", path);
-    else
-      snprintf(the_path, sizeof(the_path), "/usr/local/nprobe/%s", path);
+      snprintf(the_path, sizeof(the_path), GEOIP_DIR_LOCAL_TEMPLATE, path);
+    else {
+      snprintf(the_path, sizeof(the_path), GEOIP_DIR_NTOPNG, path);
+
+      if(stat(path, &stats) != 0)
+	snprintf(the_path, sizeof(the_path), GEOIP_DIR_SYSTEM_TEMPLATE, path);
+    }
 
     if((readOnlyGlobals.geo_ip_asn_db = GeoIP_open(the_path, GEOIP_CHECK_CACHE)) != NULL) {
       traceEvent(TRACE_NORMAL, "GeoIP: loaded AS config file %s", the_path);
     } else
       traceEvent(TRACE_WARNING, "Unable to load AS file %s. AS support disabled", the_path);
+
+    /* ********************************************* */
+
+    strcpy(&the_path[strlen(the_path)-4], "v6.dat");
+
+    if((readOnlyGlobals.geo_ip_asn_db_v6 = GeoIP_open(the_path, GEOIP_CHECK_CACHE)) != NULL) {
+      traceEvent(TRACE_NORMAL, "GeoIP: loaded AS IPv6 config file %s", the_path);
+    } else
+      traceEvent(TRACE_WARNING, "Unable to load AS IPv6 file %s. AS IPv6 support disabled", the_path);
   }
 #endif
 }
@@ -309,258 +322,30 @@ void readCities(char *path) {
     char the_path[256];
 
     if(stat(path, &stats) == 0)
-      snprintf(the_path, sizeof(the_path), "%s", path);
-    else
-      snprintf(the_path, sizeof(the_path), "/usr/local/nprobe/%s", path);
+      snprintf(the_path, sizeof(the_path), GEOIP_DIR_LOCAL_TEMPLATE, path);
+    else {
+      snprintf(the_path, sizeof(the_path), GEOIP_DIR_NTOPNG, path);
+
+      if(stat(path, &stats) != 0)
+	snprintf(the_path, sizeof(the_path), GEOIP_DIR_SYSTEM_TEMPLATE, path);
+    }
 
     if((readOnlyGlobals.geo_ip_city_db = GeoIP_open(the_path, GEOIP_CHECK_CACHE)) != NULL) {
       traceEvent(TRACE_NORMAL, "GeoIP: loaded cities config file %s", the_path);
     } else
       traceEvent(TRACE_WARNING, "Unable to load cities file %s. IP geolocation disabled", the_path);
+
+    /* ********************************************* */
+
+    strcpy(&the_path[strlen(the_path)-4], "v6.dat");
+
+    if((readOnlyGlobals.geo_ip_city_db_v6 = GeoIP_open(the_path, GEOIP_CHECK_CACHE)) != NULL) {
+      traceEvent(TRACE_NORMAL, "GeoIP: loaded IPv6 cities config file %s", the_path);
+    } else
+      traceEvent(TRACE_WARNING, "Unable to load IPv6 cities file %s. IPv6 cities geolocation disabled", the_path);
+
   }
 #endif
-}
-
-/* ********* NetFlow v9/IPFIX ***************************** */
-
-/*
-  Cisco Systems NetFlow Services Export Version 9
-
-  http://www.faqs.org/rfcs/rfc3954.html
-
-  See http://www.plixer.com/blog/tag/in_bytes/ for IN/OUT directions
-*/
-
-V9V10TemplateElementId ver9_templates[] = {
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   1,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_formatted_uint,  "IN_BYTES", "Incoming flow bytes (src->dst)" },
-  { OPTION_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID, 1,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "SYSTEM_ID", "" }, /* Hack for options template */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   2,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_formatted_uint,  "IN_PKTS", "Incoming flow packets (src->dst)" },
-  { OPTION_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID, 2,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "INTERFACE_ID", "" }, /* Hack for options template */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   3,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_formatted_uint,  "FLOWS", "Number of flows" },
-  { OPTION_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID, 3,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "LINE_CARD", "" }, /* Hack for options template */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   4,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "PROTOCOL", "IP protocol byte" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   0xA0+4, STATIC_FIELD_LEN, CUSTOM_FIELD_LEN, numeric_format, dump_as_ip_proto,  "PROTOCOL_MAP", "IP protocol name" },
-  { OPTION_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID, 4,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "NETFLOW_CACHE", "" }, /* Hack for options template */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   5,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "SRC_TOS", "Type of service byte" },
-  { OPTION_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID, 5,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "TEMPLATE_ID", "" }, /* Hack for options template */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   6,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "TCP_FLAGS", "Cumulative of all flow TCP flags" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   7,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "L4_SRC_PORT", "IPv4 source port" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   0xA0+7, STATIC_FIELD_LEN, CUSTOM_FIELD_LEN, numeric_format, dump_as_ip_port,  "L4_SRC_PORT_MAP", "IPv4 source port symbolic name" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   8,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_ipv4_address,  "IPV4_SRC_ADDR", "IPv4 source address" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   9,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_ipv6_address,  "IPV4_SRC_MASK", "IPv4 source subnet mask (/<bits>)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   10,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "INPUT_SNMP", "Input interface SNMP idx" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   11,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "L4_DST_PORT", "IPv4 destination port" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   0xA0+11, STATIC_FIELD_LEN, CUSTOM_FIELD_LEN, numeric_format, dump_as_ip_port,  "L4_DST_PORT_MAP", "IPv4 destination port symbolic name" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   12,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_ipv4_address,  "IPV4_DST_ADDR", "IPv4 destination address" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   13,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "IPV4_DST_MASK", "IPv4 dest subnet mask (/<bits>)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   14,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "OUTPUT_SNMP", "Output interface SNMP idx" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   15,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_ipv4_address,  "IPV4_NEXT_HOP", "IPv4 next hop address" },
-
-  /* In earlier versions AS were 16 bit in 'modern' NetFlow v9 and later, they are 32 bit */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   16,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "SRC_AS", "Source BGP AS" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   17,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "DST_AS", "Destination BGP AS" },
-  /*
-    { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   18,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "BGP_IPV4_NEXT_HOP", "" },
-    { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   19,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "MUL_DST_PKTS", "" },
-    { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   20,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "MUL_DST_BYTES", "" },
-  */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   21,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "LAST_SWITCHED", "SysUptime (msec) of the last flow pkt" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   22,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "FIRST_SWITCHED", "SysUptime (msec) of the first flow pkt" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   23,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_formatted_uint,  "OUT_BYTES", "Outgoing flow bytes (dst->src)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   24,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_formatted_uint,  "OUT_PKTS", "Outgoing flow packets (dst->src)" },
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   25,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   26,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   27,  STATIC_FIELD_LEN, 16, ipv6_address_format, dump_as_ipv6_address,  "IPV6_SRC_ADDR", "IPv6 source address" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   28,  STATIC_FIELD_LEN, 16, ipv6_address_format, dump_as_ipv6_address,  "IPV6_DST_ADDR", "IPv6 destination address" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   29,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "IPV6_SRC_MASK", "IPv6 source mask" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   30,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "IPV6_DST_MASK", "IPv6 destination mask" },
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   31,  STATIC_FIELD_LEN, 3, numeric_format, dump_as_uint,  "IPV6_FLOW_LABEL", "" }, */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   32,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "ICMP_TYPE", "ICMP Type * 256 + ICMP code" },
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   33,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "MUL_IGMP_TYPE", "" }, */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   34,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "SAMPLING_INTERVAL", "Sampling rate" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   35,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "SAMPLING_ALGORITHM", "Sampling type (deterministic/random)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   36,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "FLOW_ACTIVE_TIMEOUT", "Activity timeout of flow cache entries" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   37,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "FLOW_INACTIVE_TIMEOUT", "Inactivity timeout of flow cache entries" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   38,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "ENGINE_TYPE", "Flow switching engine" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   39,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "ENGINE_ID", "Id of the flow switching engine" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   40,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_formatted_uint,  "TOTAL_BYTES_EXP", "Total bytes exported" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   41,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_formatted_uint,  "TOTAL_PKTS_EXP", "Total flow packets exported" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   42,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_formatted_uint,  "TOTAL_FLOWS_EXP", "Total number of exported flows" },
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   43,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   44,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   45,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   46,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, i*/
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   47,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   48,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   49,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   50,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   51,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   52,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   53,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   54,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   55,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   56,  STATIC_FIELD_LEN, 6, hex_format, dump_as_mac_address,  "IN_SRC_MAC", "Source MAC Address" }, 
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   58,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "SRC_VLAN", "Source VLAN" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   59,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "DST_VLAN", "Destination VLAN" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   60,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "IP_PROTOCOL_VERSION", "[4=IPv4][6=IPv6]" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   61,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "DIRECTION", "It indicates where a sample has been taken (always 0)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   62,  STATIC_FIELD_LEN, 16, numeric_format, dump_as_uint,  "IPV6_NEXT_HOP", "IPv6 next hop address" },
-  /*
-    { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   63,  STATIC_FIELD_LEN, 16, ipv6_address_format, dump_as_uint,  "BPG_IPV6_NEXT_HOP", "" },
-    { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   64,  STATIC_FIELD_LEN, 16, ipv6_address_format, dump_as_uint,  "IPV6_OPTION_HEADERS", "" },
-  */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   65,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   66,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   67,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   68,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  /* { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   69,  STATIC_FIELD_LEN, 0, numeric_format, dump_as_uint,  "RESERVED", "" }, */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   70,  STATIC_FIELD_LEN, 3, numeric_format, dump_as_uint,  "MPLS_LABEL_1",  "MPLS label at position 1" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   71,  STATIC_FIELD_LEN, 3, numeric_format, dump_as_uint,  "MPLS_LABEL_2",  "MPLS label at position 2" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   72,  STATIC_FIELD_LEN, 3, numeric_format, dump_as_uint,  "MPLS_LABEL_3",  "MPLS label at position 3" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   73,  STATIC_FIELD_LEN, 3, numeric_format, dump_as_uint,  "MPLS_LABEL_4",  "MPLS label at position 4" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   74,  STATIC_FIELD_LEN, 3, numeric_format, dump_as_uint,  "MPLS_LABEL_5",  "MPLS label at position 5" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   75,  STATIC_FIELD_LEN, 3, numeric_format, dump_as_uint,  "MPLS_LABEL_6",  "MPLS label at position 6" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   76,  STATIC_FIELD_LEN, 3, numeric_format, dump_as_uint,  "MPLS_LABEL_7",  "MPLS label at position 7" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   77,  STATIC_FIELD_LEN, 3, numeric_format, dump_as_uint,  "MPLS_LABEL_8",  "MPLS label at position 8" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   78,  STATIC_FIELD_LEN, 3, numeric_format, dump_as_uint,  "MPLS_LABEL_9",  "MPLS label at position 9" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   79,  STATIC_FIELD_LEN, 3, numeric_format, dump_as_uint,  "MPLS_LABEL_10", "MPLS label at position 10" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   80,  STATIC_FIELD_LEN, 6, hex_format, dump_as_mac_address,  "OUT_DST_MAC", "Destination MAC Address" }, /* new */
-
-  /* Fields not yet fully supported (collection only) */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  102,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "PACKET_SECTION_OFFSET", "Packet section offset" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  103,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "SAMPLED_PACKET_SIZE", "Sampled packet size" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  104,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "SAMPLED_PACKET_ID",   "Sampled packet id" },
-
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  148, STATIC_FIELD_LEN,  8, numeric_format, dump_as_uint, "FLOW_ID", "Serial Flow Identifier" },
-
-  /* Fields not yet fully supported (collection only) */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  277, STATIC_FIELD_LEN,  2, numeric_format, dump_as_uint,  "OBSERVATION_POINT_TYPE",  "Observation point type" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  300, STATIC_FIELD_LEN,  2, numeric_format, dump_as_uint,  "OBSERVATION_POINT_ID",  "Observation point id" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  302, STATIC_FIELD_LEN,  2, numeric_format, dump_as_uint,  "SELECTOR_ID",  "Selector id" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  304, STATIC_FIELD_LEN,  2, numeric_format, dump_as_uint,  "SAMPLING_ALGORITHM",  "Sampling algorithm" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  309, STATIC_FIELD_LEN,  2, numeric_format, dump_as_uint,  "SAMPLING_SIZE",  "Number of packets to sample" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  310, STATIC_FIELD_LEN,  2, numeric_format, dump_as_uint,  "SAMPLING_POPULATION", "Sampling population" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  312, STATIC_FIELD_LEN,  2, numeric_format, dump_as_uint,  "FRAME_LENGTH", "Original L2 frame length" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  318, STATIC_FIELD_LEN,  2, numeric_format, dump_as_uint,  "PACKETS_OBSERVED", "Tot number of packets seen" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  319, STATIC_FIELD_LEN,  2, numeric_format, dump_as_uint,  "PACKETS_SELECTED", "Number of pkts selected for sampling" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,  335, STATIC_FIELD_LEN,  2, numeric_format, dump_as_uint,  "SELECTOR_NAME", "Sampler name" },
-
-  /*
-    ntop Extensions
-
-    IMPORTANT
-    if you change/add constants here/below make sure
-    you change them into ntop too.
-  */
-
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+80,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "FRAGMENTS", "Number of fragmented flow packets" },
-  /* 81 is available */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+82,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "CLIENT_NW_DELAY_SEC",  "Network latency client <-> nprobe (sec)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+83,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "CLIENT_NW_DELAY_USEC", "Network latency client <-> nprobe (usec)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+84,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "SERVER_NW_DELAY_SEC",  "Network latency nprobe <-> server (sec)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+85,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "SERVER_NW_DELAY_USEC", "Network latency nprobe <-> server (usec)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+86,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "APPL_LATENCY_SEC", "Application latency (sec)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+87,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "APPL_LATENCY_USEC", "Application latency (usec)" },
-
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+IN_PAYLOAD_ID,  STATIC_FIELD_LEN, 0 /* The length is set at runtime */, ascii_format, dump_as_hex,  "IN_PAYLOAD", "Initial payload bytes" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+OUT_PAYLOAD_ID,  STATIC_FIELD_LEN, 0 /* The length is set at runtime */, ascii_format, dump_as_ascii,  "OUT_PAYLOAD", "Initial payload bytes" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+98,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint,  "ICMP_FLAGS", "Cumulative of all flow ICMP types" },
-  /* 99+100 are available */
-
-#ifdef HAVE_GEOIP
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+101, STATIC_FIELD_LEN, 2,  ascii_format, dump_as_ascii, "SRC_IP_COUNTRY", "Country where the src IP is located" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+102, STATIC_FIELD_LEN, 16, ascii_format, dump_as_ascii, "SRC_IP_CITY", "City where the src IP is located" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+103, STATIC_FIELD_LEN, 2,  ascii_format, dump_as_ascii, "DST_IP_COUNTRY", "Country where the dst IP is located" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+104, STATIC_FIELD_LEN, 16, ascii_format, dump_as_ascii, "DST_IP_CITY", "City where the dst IP is located" },
-#endif
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+105, STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint, "FLOW_PROTO_PORT", "L7 port that identifies the flow protocol or 0 if unknown" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+106, STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint, "TUNNEL_ID", "Tunnel identifier (e.g. GTP tunnel Id) or 0 if unknown" },
-
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+107, STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint, "LONGEST_FLOW_PKT", "Longest packet (bytes) of the flow" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+108, STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint, "SHORTEST_FLOW_PKT", "Shortest packet (bytes) of the flow" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+109, STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint, "RETRANSMITTED_IN_PKTS", "Number of retransmitted TCP flow packets (src->dst)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+110, STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint, "RETRANSMITTED_OUT_PKTS", "Number of retransmitted TCP flow packets (dst->src)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+111, STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint, "OOORDER_IN_PKTS", "Number of out of order TCP flow packets (dst->src)" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+112, STATIC_FIELD_LEN, 4, numeric_format, dump_as_uint, "OOORDER_OUT_PKTS", "Number of out of order TCP flow packets (dst->src)" },
-
-
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+113,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "UNTUNNELED_PROTOCOL", "Untunneled IP protocol byte" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+114,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_ipv4_address,  "UNTUNNELED_IPV4_SRC_ADDR", "Untunneled IPv4 source address" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+115,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "UNTUNNELED_L4_SRC_PORT", "Untunneled IPv4 source port" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+116,  STATIC_FIELD_LEN, 4, numeric_format, dump_as_ipv4_address,  "UNTUNNELED_IPV4_DST_ADDR", "Untunneled IPv4 destination address" },
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,NTOP_ENTERPRISE_ID,   NTOP_BASE_ID+117,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "UNTUNNELED_L4_DST_PORT", "Untunneled IPv4 destination port" },
-
-  /*
-    { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   NTOP_BASE_ID+0,  STATIC_FIELD_LEN, 1, numeric_format, dump_as_uint,  "PAD1", "" },
-    { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID,   NTOP_BASE_ID+0,  STATIC_FIELD_LEN, 2, numeric_format, dump_as_uint,  "PAD2", "" },
-  */
-  { FLOW_TEMPLATE, SHORT_SNAPLEN,STANDARD_ENTERPRISE_ID, 0, STATIC_FIELD_LEN, 0, 0, 0, NULL, NULL }
-};
-
-
-/* ******************************************** */
-
-void printTemplateInfo(V9V10TemplateElementId *templates,
-		       u_char show_private_elements) {
-  int j = 0;
-
-  while(templates[j].templateElementName != NULL) {
-    if(((!show_private_elements)
-	&& ((templates[j].templateElementLen > 0)
-	    || (templates[j].templateElementId == IN_PAYLOAD_ID)
-	    || (templates[j].templateElementId == OUT_PAYLOAD_ID)))
-       || (show_private_elements && (templates[j].templateElementId >= 0xFF))) {
-
-      if(templates[j].templateElementEnterpriseId == NTOP_ENTERPRISE_ID) {
-	printf("[NFv9 %3d][IPFIX %5d.%d] %%%-22s\t%s\n",
-	       templates[j].templateElementId,
-	       templates[j].templateElementEnterpriseId, templates[j].templateElementId-NTOP_BASE_ID,
-	       templates[j].templateElementName,
-	       templates[j].templateElementDescr);
-      } else {
-	printf("[%3d] %%%-22s\t%s\n",
-	       templates[j].templateElementId,
-	       templates[j].templateElementName,
-	       templates[j].templateElementDescr);
-      }
-    }
-
-    j++;
-  }
-}
-
-/* ******************************************** */
-
-char* getStandardFieldId(u_int id) {
-  int i = 0;
-
-  while(ver9_templates[i].templateElementName != NULL) {
-    if(ver9_templates[i].templateElementId == id)
-      return(ver9_templates[i].templateElementName);
-    else
-      i++;
-  }
-  
-  return("");
-}
-
-/* ******************************************** */
-
-void setPayloadLength(int len) {
-  int i = 0;
-
-  while(ver9_templates[i].templateElementName != NULL) {
-    if((ver9_templates[i].templateElementId == IN_PAYLOAD_ID)
-       || (ver9_templates[i].templateElementId == OUT_PAYLOAD_ID)) {
-      ver9_templates[i].templateElementLen = len;
-
-      if(0)
-	traceEvent(TRACE_ERROR, "--> Setting payload length for element %s",
-		   ver9_templates[i].templateElementName);
-    }
-
-    i++;
-  }
 }
 
 /* ******************************************** */
@@ -606,24 +391,24 @@ void copyInt32(u_int32_t _t32, char *outBuffer,
 /* ******************************************** */
 
 /* 64-bit version of ntohl and htonl */
-unsigned long long htonll(unsigned long long v) {
-  union { unsigned long lv[2]; unsigned long long llv; } u;
+u_int64_t _htonll(u_int64_t v) {
+  union { u_int32_t lv[2]; u_int64_t llv; } u;
   u.lv[0] = htonl(v >> 32);
   u.lv[1] = htonl(v & 0xFFFFFFFFULL);
   return u.llv;
 }
 
-unsigned long long ntohll(unsigned long long v) {
-  union { unsigned long lv[2]; unsigned long long llv; } u;
+u_int64_t _ntohll(u_int64_t v) {
+  union { u_int32_t lv[2]; u_int64_t llv; } u;
   u.llv = v;
-  return ((unsigned long long)ntohl(u.lv[0]) << 32) | (unsigned long long)ntohl(u.lv[1]);
+  return ((u_int64_t)ntohl(u.lv[0]) << 32) | (u_int64_t)ntohl(u.lv[1]);
 }
 
 /* ******************************************** */
 
 void copyInt64(u_int64_t _t64, char *outBuffer,
 	       uint *outBufferBegin, uint *outBufferMax) {
-  u_int64_t t64 = htonll(_t64);
+  u_int64_t t64 = _htonll(_t64);
 
   if((*outBufferBegin)+sizeof(t64) < (*outBufferMax)) {
     memcpy(&outBuffer[(*outBufferBegin)], &t64, sizeof(t64));
@@ -643,105 +428,64 @@ void copyLen(u_char *str, int strLen, char *outBuffer,
 
 /* ******************************************** */
 
-static void copyIpV6(struct in6_addr ipv6, char *outBuffer,
-		     uint *outBufferBegin, uint *outBufferMax) {
-  copyLen((u_char*)&ipv6, sizeof(ipv6), outBuffer,
-	  outBufferBegin, outBufferMax);
-}
+static u_int8_t isEven(u_int num) { return(((num % 2) == 0) ? 1 : 0); }
 
 /* ******************************************** */
 
-static void copyMac(u_char *macAddress, char *outBuffer,
-		    uint *outBufferBegin, uint *outBufferMax) {
-  copyLen(macAddress, 6 /* lenght of mac address */,
-	  outBuffer, outBufferBegin, outBufferMax);
-}
-
-/* ******************************************** */
-
-static void copyMplsLabel(struct mpls_labels *mplsInfo, int labelId,
-			  char *outBuffer, uint *outBufferBegin,
-			  uint *outBufferMax) {
-  if(mplsInfo == NULL) {
-    int i;
-
-    for(i=0; (i < 3) && (*outBufferBegin < *outBufferMax); i++) {
-      outBuffer[*outBufferBegin] = 0;
-      (*outBufferBegin)++;
-    }
-  } else {
-    if(((*outBufferBegin)+MPLS_LABEL_LEN) < (*outBufferMax)) {
-      memcpy(outBuffer, mplsInfo->mplsLabels[labelId-1], MPLS_LABEL_LEN);
-      (*outBufferBegin) += MPLS_LABEL_LEN;
-    }
-  }
-}
-
-/* ****************************************************** */
-
-static void exportPayload(FlowHashBucket *myBucket, FlowDirection direction,
-			  V9V10TemplateElementId *theTemplate,
-			  char *outBuffer, uint *outBufferBegin,
-			  uint *outBufferMax) {
-  if(readOnlyGlobals.maxPayloadLen > 0) {
-    u_char thePayload[MAX_PAYLOAD_LEN];
-    int len;
-
-    if(direction == src2dst_direction)
-      len = myBucket->src2dstPayloadLen;
-    else
-      len = myBucket->dst2srcPayloadLen;
-
-    /*
-      u_int16_t t16;
-
-      t16 = theTemplate->templateId;
-      copyInt16(t16, outBuffer, outBufferBegin, outBufferMax);
-      t16 = maxPayloadLen;
-      copyInt16(t16, outBuffer, outBufferBegin, outBufferMax);
-    */
-
-    memset(thePayload, 0, readOnlyGlobals.maxPayloadLen);
-    if(len > readOnlyGlobals.maxPayloadLen) len = readOnlyGlobals.maxPayloadLen;
-    memcpy(thePayload, direction == src2dst_direction ? myBucket->src2dstPayload : myBucket->dst2srcPayload, len);
-
-    copyLen(thePayload, readOnlyGlobals.maxPayloadLen, outBuffer, outBufferBegin, outBufferMax);
-  }
-}
-
-/* ******************************************** */
-
-u_int16_t ifIdx(FlowHashBucket *myBucket, FlowDirection direction, int inputIf) {
+u_int16_t ifIdx(FlowHashBucket *myBucket,
+		int inputIfIdx /* 1=if_input, 0=if_output */) {
   u_char *mac;
   u_int16_t idx;
   struct in_addr addr;
 
-  if(readOnlyGlobals.use_vlanId_as_ifId) {
-    return(myBucket->vlanId);
-  }
+  if(readOnlyGlobals.use_vlanId_as_ifId != vlan_disabled) {
+    switch(readOnlyGlobals.use_vlanId_as_ifId) {
+    case single_vlan:
+      if(isEven(myBucket->core.tuple.key.vlanId)) {
+	/* Even VLAN Tag */
 
-  addr.s_addr = inputIf ? htonl(myBucket->src->host.ipType.ipv4) : htonl(myBucket->dst->host.ipType.ipv4);
+	if(inputIfIdx) return(0);
+	else return(myBucket->core.tuple.key.vlanId);
+      } else {
+	/* Odd VLAN Tag */
+
+	if(inputIfIdx) return(myBucket->core.tuple.key.vlanId-1);
+	else return(0);
+      }
+      break;
+    case double_vlan:
+      if(isEven(myBucket->core.tuple.key.vlanId)) {
+	/* Even VLAN Tag */
+
+	if(inputIfIdx) return(myBucket->core.tuple.key.vlanId+1);
+	else return(myBucket->core.tuple.key.vlanId);
+      } else {
+	/* Odd VLAN Tag */
+
+	if(inputIfIdx) return(myBucket->core.tuple.key.vlanId-1);
+	else return(myBucket->core.tuple.key.vlanId);
+      }
+      break;
+    default:
+      return(myBucket->core.tuple.key.vlanId);
+    }
+  }
+  addr.s_addr = inputIfIdx ? htonl(myBucket->core.tuple.key.k.ipKey.src.ipType.ipv4) : htonl(myBucket->core.tuple.key.k.ipKey.dst.ipType.ipv4);
 
   if(getIfIdx(&addr, &idx))
     return(idx);
 
   if(readWriteGlobals->num_src_mac_export > 0) {
-    int i = 0;
+    int i;
 
     for(i = 0; i<readWriteGlobals->num_src_mac_export; i++)
-      if((((inputIf == 1) && (direction == src2dst_direction))
-	  || ((inputIf == 0) && (direction == dst2src_direction)))
-	 && (memcmp(myBucket->srcMacAddress,
-		    readOnlyGlobals.mac_if_match[i].mac_address, 6) == 0))
+      if(inputIfIdx && (memcmp(myBucket->ext->srcInfo.macAddress, readOnlyGlobals.mac_if_match[i].mac_address, 6) == 0))
         return(readOnlyGlobals.mac_if_match[i].interface_id);
-      else if((((inputIf == 0) && (direction == src2dst_direction))
-	       || ((inputIf == 1) && (direction == dst2src_direction)))
-	      && (memcmp(myBucket->dstMacAddress,
-			 readOnlyGlobals.mac_if_match[i].mac_address, 6) == 0))
+      else if((!inputIfIdx) && (memcmp(myBucket->ext->dstInfo.macAddress,readOnlyGlobals.mac_if_match[i].mac_address, 6) == 0))
         return(readOnlyGlobals.mac_if_match[i].interface_id);
   }
 
-  if(inputIf) {
+  if(inputIfIdx) {
     if(readOnlyGlobals.inputInterfaceIndex != NO_INTERFACE_INDEX)
       return(readOnlyGlobals.inputInterfaceIndex);
   } else {
@@ -753,17 +497,10 @@ u_int16_t ifIdx(FlowHashBucket *myBucket, FlowDirection direction, int inputIf) 
 
   /* Calculate the input/output interface using
      the last two MAC address bytes */
-  if(direction == src2dst_direction /* src -> dst */) {
-    if(inputIf)
-      mac = &(myBucket->srcMacAddress[4]);
-    else
-      mac = &(myBucket->dstMacAddress[4]);
-  } else {
-    if(inputIf)
-      mac = &(myBucket->dstMacAddress[4]);
-    else
-      mac = &(myBucket->srcMacAddress[4]);
-  }
+  if(inputIfIdx)
+    mac = &(myBucket->ext->srcInfo.macAddress[4]);
+  else
+    mac = &(myBucket->ext->dstInfo.macAddress[4]);
 
   idx = (mac[0] * 256) + mac[1];
 
@@ -772,7 +509,7 @@ u_int16_t ifIdx(FlowHashBucket *myBucket, FlowDirection direction, int inputIf) 
 
 /* ******************************************** */
 
-static char* port2name(u_int16_t port, u_int8_t proto) {
+char* port2name(u_int16_t port, u_int8_t proto) {
 #if 0
   struct servent *svt;
 
@@ -791,6 +528,18 @@ static char* port2name(u_int16_t port, u_int8_t proto) {
   else if(proto == 17) return("udp_other");
   else return("<unknown>"); /* Not reached */
 #endif
+}
+
+/* ******************************************** */
+
+u_int16_t getServerPort(FlowHashBucket *theFlow) {
+  switch(theFlow->core.tuple.key.k.ipKey.proto) {
+  case IPPROTO_TCP:
+  case IPPROTO_UDP:
+    return((theFlow->core.tuple.key.k.ipKey.dport < theFlow->core.tuple.key.k.ipKey.sport) ? theFlow->core.tuple.key.k.ipKey.dport : theFlow->core.tuple.key.k.ipKey.sport);
+  default:
+    return(0);
+  }
 }
 
 /* **************************************************************** */
@@ -881,525 +630,22 @@ u_int16_t port2ApplProtocol(u_int8_t proto, u_int16_t port) {
 
 u_int16_t getFlowApplProtocol(FlowHashBucket *theFlow) {
   u_int16_t value;
-  u_int16_t proto_sport = port2ApplProtocol(theFlow->proto, theFlow->sport);
-  u_int16_t proto_dport = port2ApplProtocol(theFlow->proto, theFlow->dport);
+  u_int16_t proto_sport = port2ApplProtocol(theFlow->core.tuple.key.k.ipKey.proto, theFlow->core.tuple.key.k.ipKey.sport);
+  u_int16_t proto_dport = port2ApplProtocol(theFlow->core.tuple.key.k.ipKey.proto, theFlow->core.tuple.key.k.ipKey.dport);
 
-  if((theFlow->proto == IPPROTO_TCP) || (theFlow->proto == IPPROTO_UDP)) {
+  if((theFlow->core.tuple.key.k.ipKey.proto == IPPROTO_TCP) || (theFlow->core.tuple.key.k.ipKey.proto == IPPROTO_UDP)) {
     if(proto_sport == 0) value = proto_dport;
     else if(proto_dport == 0) value = proto_sport;
     else {
-      if(theFlow->sport < theFlow->dport) value = proto_sport;
+      if(theFlow->core.tuple.key.k.ipKey.sport < theFlow->core.tuple.key.k.ipKey.dport) value = proto_sport;
       else value = proto_dport;
     }
   } else
     value = 0;
 
-  // traceEvent(TRACE_ERROR, "[%u/%u] -> %u", theFlow->sport, theFlow->dport, value);
+  // traceEvent(TRACE_ERROR, "[%u/%u] -> %u", theFlow->core.tuple.key.k.ipKey.sport, theFlow->core.tuple.key.k.ipKey.dport, value);
 
   return(value);
-}
-
-/* ******************************************** */
-
-static void handleTemplate(V9V10TemplateElementId *theTemplateElement,
-			   u_int8_t ipv4_template,
-			   char *outBuffer, uint *outBufferBegin,
-			   uint *outBufferMax,
-			   char buildTemplate, int *numElements,
-			   FlowHashBucket *theFlow, FlowDirection direction,
-			   int addTypeLen, int optionTemplate) {
-#ifdef HAVE_GEOIP
-  GeoIPRecord *geo;
-#endif
-  u_char null_data[128] = { 0 };
-  u_int16_t t16;
-
-  if(buildTemplate || addTypeLen) {
-    /* Type */
-    t16 = theTemplateElement->templateElementId;
-
-    if((readOnlyGlobals.netFlowVersion == 10)
-       && (theTemplateElement->templateElementEnterpriseId != STANDARD_ENTERPRISE_ID)) {
-      if(theTemplateElement->templateElementEnterpriseId == NTOP_ENTERPRISE_ID)
-	t16 -= NTOP_BASE_ID; /* Just to make sure we don't mess-up the template */
-
-      t16 = t16 | 0x8000; /* Enable the PEN bit */
-    }
-
-    copyInt16(t16, outBuffer, outBufferBegin, outBufferMax);
-
-    /* Len */
-    if((readOnlyGlobals.netFlowVersion == 10)
-       && (theTemplateElement->variableFieldLength == VARIABLE_FIELD_LEN)) {
-      t16 = 65535; /* Reserved len as specified in rfc5101 */
-    } else
-      t16 = theTemplateElement->templateElementLen;
-
-    copyInt16(t16, outBuffer, outBufferBegin, outBufferMax);
-
-    if((readOnlyGlobals.netFlowVersion == 10)
-       && (theTemplateElement->templateElementEnterpriseId != STANDARD_ENTERPRISE_ID)) {
-      /* PEN */
-      copyInt32(theTemplateElement->templateElementEnterpriseId,
-		outBuffer, outBufferBegin, outBufferMax);
-    }
-  }
-
-  if(!buildTemplate) {
-    if(theTemplateElement->templateElementLen == 0)
-      ; /* Nothing to do: all fields have zero length */
-    else {
-      u_char custom_field[CUSTOM_FIELD_LEN];
-
-#ifdef DEBUG
-	traceEvent(TRACE_INFO, "[%d][%s][%d]",
-		   theTemplateElement->templateElementId,
-		   theTemplateElement->templateElementName,
-		   theTemplateElement->templateElementLen);
-#endif
-
-      if(theTemplateElement->isOptionTemplate) {
-	copyLen(null_data, theTemplateElement->templateElementLen,
-		outBuffer, outBufferBegin, outBufferMax);
-      } else {
-	/*
-	 * IMPORTANT
-	 *
-	 * Any change below need to be ported also in printRecordWithTemplate()
-	 *
-	 */
-	switch(theTemplateElement->templateElementId) {
-	case 1:
-	  copyInt32(direction == dst2src_direction ? theFlow->flowCounters.bytesRcvd : theFlow->flowCounters.bytesSent,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 2:
-	  copyInt32(direction == dst2src_direction ? theFlow->flowCounters.pktRcvd : theFlow->flowCounters.pktSent,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 4:
-	  copyInt8((u_int8_t)theFlow->proto, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 5:
-	  copyInt8(direction == src2dst_direction ? theFlow->src2dstTos : theFlow->dst2srcTos,
-		   outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 6:
-	  copyInt8(direction == src2dst_direction ? theFlow->src2dstTcpFlags : theFlow->dst2srcTcpFlags,
-		   outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 7:
-	  copyInt16(direction == src2dst_direction ? theFlow->sport : theFlow->dport, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 8:
-	  if((theFlow->src->host.ipVersion == 4) && (theFlow->dst->host.ipVersion == 4))
-	    copyInt32(direction == src2dst_direction ? theFlow->src->host.ipType.ipv4 : theFlow->dst->host.ipType.ipv4,
-		      outBuffer, outBufferBegin, outBufferMax);
-	  else
-	    copyInt32(0, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 9: /* IPV4_SRC_MASK */
-	  copyInt8(ip2mask((direction == src2dst_direction) ? theFlow->src->host: theFlow->dst->host),
-		   outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 10: /* INPUT_SNMP */
-	  copyInt16((direction == src2dst_direction) ? theFlow->if_input : theFlow->if_output, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 11:
-	  copyInt16(direction == src2dst_direction ? theFlow->dport : theFlow->sport, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 12:
-	  if((theFlow->src->host.ipVersion == 4) && (theFlow->dst->host.ipVersion == 4))
-	    copyInt32(direction == src2dst_direction ? theFlow->dst->host.ipType.ipv4 : theFlow->src->host.ipType.ipv4,
-		      outBuffer, outBufferBegin, outBufferMax);
-	  else
-	    copyInt32(0, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 13: /* IPV4_DST_MASK */
-	  copyInt8(ip2mask((direction == dst2src_direction) ? theFlow->src->host: theFlow->dst->host),
-		   outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 14: /* OUTPUT_SNMP */
-	  copyInt16((direction != src2dst_direction) ? theFlow->if_input : theFlow->if_output, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 15: /* IPV4_NEXT_HOP */
-	  copyInt32(0, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 16:
-	  copyInt32(direction == src2dst_direction ? getAS(theFlow, 1) : getAS(theFlow, 0),
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 17:
-	  copyInt32(direction == src2dst_direction ? getAS(theFlow, 0) : getAS(theFlow, 1),
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 21:
-	  if(readOnlyGlobals.collectorInPort > 0)
-	    copyInt32(0, outBuffer, outBufferBegin, outBufferMax);
-	  else
-	    copyInt32(direction == src2dst_direction ? msTimeDiff(&theFlow->flowTimers.lastSeenSent, &readOnlyGlobals.initialSniffTime)
-		      : msTimeDiff(&theFlow->flowTimers.lastSeenRcvd, &readOnlyGlobals.initialSniffTime),
-		      outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 22:
-	  if(readOnlyGlobals.collectorInPort > 0)
-	    copyInt32(0, outBuffer, outBufferBegin, outBufferMax);
-	  else
-	    copyInt32(direction == src2dst_direction ? msTimeDiff(&theFlow->flowTimers.firstSeenSent,
-						  &readOnlyGlobals.initialSniffTime)
-		      : msTimeDiff(&theFlow->flowTimers.firstSeenRcvd,
-				   &readOnlyGlobals.initialSniffTime),
-		      outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 23:
-	  copyInt32(direction == dst2src_direction ? theFlow->flowCounters.bytesSent : theFlow->flowCounters.bytesRcvd,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 24:
-	  copyInt32(direction == dst2src_direction ? theFlow->flowCounters.sentFragPkts : theFlow->flowCounters.rcvdFragPkts,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 27:
-	  if((theFlow->src->host.ipVersion == 6) && (theFlow->dst->host.ipVersion == 6))
-	    copyIpV6(direction == src2dst_direction ? theFlow->src->host.ipType.ipv6 : theFlow->dst->host.ipType.ipv6,
-		     outBuffer, outBufferBegin, outBufferMax);
-	  else {
-	    struct in6_addr _ipv6;
-
-	    memset(&_ipv6, 0, sizeof(struct in6_addr));
-	    copyIpV6(_ipv6, outBuffer, outBufferBegin, outBufferMax);
-	  }
-	  break;
-	case 28:
-	  if((theFlow->src->host.ipVersion == 6) && (theFlow->dst->host.ipVersion == 6))
-	    copyIpV6(direction == src2dst_direction ? theFlow->dst->host.ipType.ipv6 : theFlow->dst->host.ipType.ipv6,
-		     outBuffer, outBufferBegin, outBufferMax);
-	  else {
-	    struct in6_addr _ipv6;
-
-	    memset(&_ipv6, 0, sizeof(struct in6_addr));
-	    copyIpV6(_ipv6, outBuffer, outBufferBegin, outBufferMax);
-	  }
-	  break;
-	case 29:
-	case 30:
-	  copyInt8(0, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 32:
-	  copyInt16(direction == src2dst_direction ? theFlow->src2dstIcmpType : theFlow->dst2srcIcmpType,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 34: /* SAMPLING INTERVAL */
-	  copyInt32(1 /* 1:1 = no sampling */, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 35: /* SAMPLING ALGORITHM */
-	  copyInt8(0x01 /* 1=Deterministic Sampling, 0x02=Random Sampling */,
-		   outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 36: /* FLOW ACTIVE TIMEOUT */
-	  copyInt16(readOnlyGlobals.lifetimeTimeout, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 37: /* FLOW INACTIVE TIMEOUT */
-	  copyInt16(readOnlyGlobals.idleTimeout, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 38:
-	  copyInt8((u_int8_t)readOnlyGlobals.engineType, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 39:
-	  copyInt8((u_int8_t)readOnlyGlobals.engineId, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 40: /* TOTAL_BYTES_EXP */
-	  copyInt32(readWriteGlobals->flowExportStats.totExportedBytes, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 41: /* TOTAL_PKTS_EXP */
-	  copyInt32(readWriteGlobals->flowExportStats.totExportedPkts, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 42: /* TOTAL_FLOWS_EXP */
-	  copyInt32(readWriteGlobals->flowExportStats.totExportedFlows, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 56: /* IN_SRC_MAC */
-	  copyMac(direction == src2dst_direction ? theFlow->srcMacAddress : theFlow->dstMacAddress, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 58: /* SRC_VLAN */
-	  /* no break */
-	case 59: /* DST_VLAN */
-	  copyInt16(theFlow->vlanId, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 60: /* IP_PROTOCOL_VERSION */
-	  copyInt8((theFlow->src->host.ipVersion == 4) && (theFlow->dst->host.ipVersion == 4) ? 4 : 6, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 61: /* Direction (it indicates where a sample has been taken) */
-	  copyInt8(0 /* Always use zero */, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 62: /* IPV6_NEXT_HOP */
-	  {
-	    IpAddress addr;
-
-	    memset(&addr, 0, sizeof(addr));
-	    copyIpV6(addr.ipType.ipv6, outBuffer, outBufferBegin, outBufferMax);
-	  }
-	  break;
-	case 70: /* MPLS: label 1 */
-	  copyMplsLabel(theFlow->mplsInfo, 1, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 71: /* MPLS: label 2 */
-	  copyMplsLabel(theFlow->mplsInfo, 2, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 72: /* MPLS: label 3 */
-	  copyMplsLabel(theFlow->mplsInfo, 3, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 73: /* MPLS: label 4 */
-	  copyMplsLabel(theFlow->mplsInfo, 4, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 74: /* MPLS: label 5 */
-	  copyMplsLabel(theFlow->mplsInfo, 5, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 75: /* MPLS: label 6 */
-	  copyMplsLabel(theFlow->mplsInfo, 6, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 76: /* MPLS: label 7 */
-	  copyMplsLabel(theFlow->mplsInfo, 7, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 77: /* MPLS: label 8 */
-	  copyMplsLabel(theFlow->mplsInfo, 8, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 78: /* MPLS: label 9 */
-	  copyMplsLabel(theFlow->mplsInfo, 9, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 79: /* MPLS: label 10 */
-	  copyMplsLabel(theFlow->mplsInfo, 10, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 80: /* OUT_DST_MAC */
-	  copyMac(direction == src2dst_direction ? theFlow->dstMacAddress : theFlow->srcMacAddress, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case 148: /* FLOW_ID */
-	  copyInt64(theFlow->flow_idx, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	  /* ************************************ */
-
-	  /* nProbe Extensions */
-	case NTOP_BASE_ID+80:
-	  copyInt16(direction == src2dst_direction ? theFlow->flowCounters.sentFragPkts : theFlow->flowCounters.rcvdFragPkts,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-#if 0
-	case NTOP_BASE_ID+81:
-	  break;
-#endif
-	case NTOP_BASE_ID+82:
-	  copyInt32(nwLatencyComputed(theFlow) ? theFlow->clientNwDelay.tv_sec : 0,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case NTOP_BASE_ID+83:
-	  copyInt32(nwLatencyComputed(theFlow) ? theFlow->clientNwDelay.tv_usec : 0,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case NTOP_BASE_ID+84:
-	  copyInt32(nwLatencyComputed(theFlow) ? theFlow->serverNwDelay.tv_sec : 0,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case NTOP_BASE_ID+85:
-	  copyInt32(nwLatencyComputed(theFlow) ? theFlow->serverNwDelay.tv_usec : 0,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case NTOP_BASE_ID+86:
-	  copyInt32(applLatencyComputed(theFlow) ? (direction == src2dst_direction ? theFlow->src2dstApplLatency.tv_sec
-						    : theFlow->dst2srcApplLatency.tv_sec) : 0,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case NTOP_BASE_ID+87:
-	  copyInt32(applLatencyComputed(theFlow) ?
-		    (direction == src2dst_direction ? theFlow->src2dstApplLatency.tv_usec :
-		     theFlow->dst2srcApplLatency.tv_usec) : 0,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case NTOP_BASE_ID+IN_PAYLOAD_ID:
-	  exportPayload(theFlow, 0, theTemplateElement, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case NTOP_BASE_ID+OUT_PAYLOAD_ID:
-	  exportPayload(theFlow, 1, theTemplateElement, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case NTOP_BASE_ID+98:
-	  copyInt32(direction == src2dst_direction ? theFlow->src2dstIcmpFlags : theFlow->dst2srcIcmpFlags,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+101: /* SRC_IP_COUNTRY */
-#ifdef HAVE_GEOIP
-	  geo = (direction == src2dst_direction) ? theFlow->src->geo : theFlow->dst->geo;
-#endif
-
-	  //if(geo) traceEvent(TRACE_ERROR, "SRC_IP_COUNTRY -> %s", (geo && geo->country_code) ? geo->country_code : "???");
-
-	  copyLen((u_char*)(
-#ifdef HAVE_GEOIP
-			    (geo && geo->country_code) ? geo->country_code :
-#endif
-			    "  "), 2,
-		  outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+102: /* SRC_IP_CITY */
-#ifdef HAVE_GEOIP
-	  geo = (direction == src2dst_direction) ? theFlow->src->geo : theFlow->dst->geo;
-#endif
-
-	  // if(geo) traceEvent(TRACE_ERROR, "-> %s [%s]", geo->region, geo->country_code);
-
-	  copyLen((u_char*)(
-#ifdef HAVE_GEOIP
-			    (geo && geo->city) ? geo->city :
-#endif
-			    "                "), 16,
-		  outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+103: /* DST_IP_COUNTRY */
-#ifdef HAVE_GEOIP
-	  geo = (direction == src2dst_direction) ? theFlow->dst->geo : theFlow->src->geo;
-#endif
-
-	  // if(geo) traceEvent(TRACE_ERROR, "DST_IP_COUNTRY -> %s", (geo && geo->country_code) ? geo->country_code : "???");
-	  copyLen((u_char*)(
-#ifdef HAVE_GEOIP
-			    (geo && geo->country_code) ? geo->country_code :
-#endif
-			    "  "), 2,
-		  outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+104: /* DST_IP_CITY */
-#ifdef HAVE_GEOIP
-	  geo = (direction == src2dst_direction) ? theFlow->dst->geo : theFlow->src->geo;
-#endif
-	  copyLen((u_char*)(
-#ifdef HAVE_GEOIP
-			    (geo && geo->city) ? geo->city :
-#endif
-			    "                "), 16,
-		  outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+105: /* FLOW_PROTO_PORT */
-	  t16 = getFlowApplProtocol(theFlow);
-	  copyInt16(t16, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+106: /* TUNNEL_ID */
-	  copyInt32(theFlow->tunnel_id, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+107: /* LONGEST_FLOW_PKT */
-	  copyInt16(theFlow->flowCounters.pktSize.longest, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+108: /* SHORTEST_FLOW_PKT */
-	  copyInt16(theFlow->flowCounters.pktSize.shortest, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+109: /* RETRANSMITTED_IN_PKTS */
-	  copyInt32((direction == dst2src_direction) ? theFlow->flowCounters.tcpPkts.rcvdRetransmitted : theFlow->flowCounters.tcpPkts.sentRetransmitted,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+110: /* RETRANSMITTED_OUT_PKTS */
-	  copyInt32((direction == src2dst_direction) ? theFlow->flowCounters.tcpPkts.rcvdRetransmitted : theFlow->flowCounters.tcpPkts.sentRetransmitted,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+111: /* OOORDER_IN_PKTS */
-	  copyInt32((direction == dst2src_direction) ? theFlow->flowCounters.tcpPkts.rcvdOOOrder : theFlow->flowCounters.tcpPkts.sentOOOrder,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+112: /* OOORDER_OUT_PKTS */
-	  copyInt32((direction == src2dst_direction) ? theFlow->flowCounters.tcpPkts.rcvdOOOrder : theFlow->flowCounters.tcpPkts.sentOOOrder,
-		    outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+113: /* UNTUNNELED_PROTOCOL */
-	  copyInt8((u_int8_t)theFlow->untunneled.proto, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+114: /* UNTUNNELED_IPV4_SRC_ADDR */
-	  if(readOnlyGlobals.tunnel_mode && (theFlow->untunneled.src->host.ipVersion == 4) && (theFlow->untunneled.dst->host.ipVersion == 4))
-	    copyInt32(direction == src2dst_direction ? theFlow->untunneled.src->host.ipType.ipv4 : theFlow->untunneled.dst->host.ipType.ipv4,
-		      outBuffer, outBufferBegin, outBufferMax);
-	  else
-	    copyInt32(0, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+115: /* UNTUNNELED_L4_SRC_PORT */
-	  if(readOnlyGlobals.tunnel_mode)
-	    copyInt16(direction == src2dst_direction ? theFlow->untunneled.sport : theFlow->untunneled.dport, outBuffer, outBufferBegin, outBufferMax);
-	  else
-	    copyInt16(0, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+116: /* UNTUNNELED_IPV4_DST_ADDR */
-	  if(readOnlyGlobals.tunnel_mode && (theFlow->untunneled.src->host.ipVersion == 4) && (theFlow->untunneled.dst->host.ipVersion == 4))
-	    copyInt32(direction == src2dst_direction ? theFlow->untunneled.dst->host.ipType.ipv4 : theFlow->untunneled.src->host.ipType.ipv4,
-		      outBuffer, outBufferBegin, outBufferMax);
-	  else
-	    copyInt32(0, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	case NTOP_BASE_ID+117: /* UNTUNNELED_L4_DST_PORT */
-	  if(readOnlyGlobals.tunnel_mode)
-	    copyInt16(direction == src2dst_direction ? theFlow->untunneled.dport : theFlow->untunneled.sport, outBuffer, outBufferBegin, outBufferMax);
-	  else
-	    copyInt16(0, outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	  /* Custom fields */
-	case 0xA0+4:
-	  snprintf((char*)custom_field, sizeof(custom_field), "%s", proto2name(theFlow->proto));
-	  copyLen(custom_field, sizeof(custom_field), outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 0xA0+7:
-	  snprintf((char*)custom_field, sizeof(custom_field), "%s", port2name(direction == src2dst_direction ? theFlow->sport : theFlow->dport, theFlow->proto));
-	  copyLen(custom_field, sizeof(custom_field), outBuffer, outBufferBegin, outBufferMax);
-	  break;
-	case 0xA0+11:
-	  snprintf((char*)custom_field, sizeof(custom_field), "%s", port2name(direction == src2dst_direction ? theFlow->dport : theFlow->sport, theFlow->proto));
-	  copyLen(custom_field, sizeof(custom_field), outBuffer, outBufferBegin, outBufferMax);
-	  break;
-
-	default:
-	  if(checkPluginExport(theTemplateElement, direction, theFlow,
-			       outBuffer, outBufferBegin, outBufferMax) == -1) {
-	    /*
-	      This flow is the one we like, however we need
-	      to store some values anyway, so we put an empty value
-	    */
-	    
-	    if((readOnlyGlobals.netFlowVersion == 10)
-	       && (theTemplateElement->variableFieldLength == VARIABLE_FIELD_LEN)) {
-	      u_int len = 0;
-	      copyInt8(len, outBuffer, outBufferBegin, outBufferMax);
-	    } else {
-	      copyLen(null_data, theTemplateElement->templateElementLen,
-		      outBuffer, outBufferBegin, outBufferMax);
-	    }
-	  }
-	}
-      }
-    }
-
-#ifdef DEBUG
-    traceEvent(TRACE_INFO, "name=%s/Id=%d/len=%d [len=%d][outBufferMax=%d]\n",
-	       theTemplateElement->templateElementName,
-	       theTemplateElement->templateElementId,
-	       theTemplateElement->templateElementLen,
-	       *outBufferBegin, *outBufferMax);
-#endif
-  }
-
-  (*numElements) = (*numElements)+1;
-
-  return;
 }
 
 /* ******************************************** */
@@ -1479,479 +725,946 @@ char* proto2name(u_int8_t proto) {
 
 /* ******************************************** */
 
+/*
+  0                         1                   2
+  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                Label                  | Exp |S|
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+  Label:  Label Value, 20 bits
+  Exp:    Experimental Use, 3 bits
+  S:      Bottom of Stack, 1 bit
+*/
+
 static int mplsLabel2int(struct mpls_labels *mplsInfo, int labelId) {
+  int32_t val;
+
   if(mplsInfo == NULL)
     return(0);
-  else
-    return((mplsInfo->mplsLabels[labelId][0] << 16)
-	   + (mplsInfo->mplsLabels[labelId][1] << 8)
-	   + mplsInfo->mplsLabels[labelId][2]);
+
+  val = (mplsInfo->mplsLabels[labelId][0] << 12)
+    + (mplsInfo->mplsLabels[labelId][1] << 4)
+    + ((mplsInfo->mplsLabels[labelId][2] >> 4) & 0xff);
+
+  return(val);
 }
 
 /* ******************************************** */
 
-static void printRecordWithTemplate(V9V10TemplateElementId *theTemplateElement,
-				    char *line_buffer, uint line_buffer_len,
-				    FlowHashBucket *theFlow, FlowDirection direction) {
-  char buf[128], *dst;
+static u_int printRecordWithTemplate(V9V10TemplateElementId *theTemplateElement,
+				     PluginEntryPoint *pluginEntryPoint,
+				     char *line_buffer, u_int line_buffer_len,
+				     FlowHashBucket *theFlow, FlowDirection direction,
+				     u_int8_t json_mode) {
+  char buf[128], *dst, *country, *city;
 #ifdef HAVE_GEOIP
-  GeoIPRecord *geo;
+  GeoIPRecord *geo = NULL;
 #endif
-  uint len;
+  int avail_len;
+  u_int ret = 0, i, t;
+  struct timeval *tv;
+  u_int8_t add_quote = 0;
+  u_int teid = theTemplateElement->templateElementId;
 
-  /* traceEvent(TRACE_INFO, "[%s][%d]",
-     theTemplate->templateElementName, theTemplate->templateElementLen);
-  */
+  if(unlikely(readOnlyGlobals.enable_debug))
+    traceEvent(TRACE_INFO, "%s [%s/%u][%d]", __FUNCTION__,
+	       theTemplateElement->netflowElementName,
+	       theTemplateElement->templateElementId,
+	       theTemplateElement->templateElementLen);
 
-  len = strlen(line_buffer);
-  dst = &line_buffer[len];
+  dst = line_buffer, avail_len = line_buffer_len-1;
 
-  switch(theTemplateElement->templateElementId) {
-  case 1:
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     direction == dst2src_direction ? theFlow->flowCounters.bytesRcvd : theFlow->flowCounters.bytesSent);
+  if(avail_len == 0) return(ret);
+
+  if(json_mode) {
+    if(theFlow->core.tuple.key.k.ipKey.src.ipVersion == 6) {
+      if(teid == IPV4_SRC_ADDR)      teid = IPV6_SRC_ADDR;
+      else if(teid == IPV4_DST_ADDR) teid = IPV6_DST_ADDR;
+      else if(teid == IPV4_NEXT_HOP) return(ret);
+    } else {
+      if(teid == IPV6_SRC_ADDR)      teid = IPV4_SRC_ADDR;
+      else if(teid == IPV6_DST_ADDR) teid = IPV4_DST_ADDR;
+      else if(teid == IPV6_NEXT_HOP) return(ret);
+    }
+
+#ifdef HAVE_ZMQ
+    if(readOnlyGlobals.zmq.publisher /* ZMQ */
+       && (!readOnlyGlobals.json_symbolic_labels))
+      i = snprintf(dst, avail_len, "\"%d\":%s", teid, add_quote ? "\"" : "");
+    else
+#endif
+      i = snprintf(dst, avail_len, "\"%s\":%s", theTemplateElement->netflowElementName, add_quote ? "\"" : "");
+
+    ret += i;
+    dst = &line_buffer[ret], avail_len -= i;
+  }
+
+  if(avail_len == 0) return(ret);
+
+  switch(teid) {
+  case IN_BYTES:
+    i = snprintf(dst, avail_len, "%u",
+		 direction == dst2src_direction ? theFlow->core.tuple.flowCounters.bytesRcvd : theFlow->core.tuple.flowCounters.bytesSent);
     break;
-  case 2:
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     direction == dst2src_direction ? theFlow->flowCounters.pktRcvd : theFlow->flowCounters.pktSent);
+  case IN_PKTS:
+    i = snprintf(dst, avail_len, "%u",
+		 direction == dst2src_direction ? theFlow->core.tuple.flowCounters.pktRcvd : theFlow->core.tuple.flowCounters.pktSent);
     break;
-  case 4:
-    snprintf(dst, (line_buffer_len-len), "%d", theFlow->proto);
+  case PROTOCOL:
+    i = snprintf(dst, avail_len, "%d", theFlow->core.tuple.key.k.ipKey.proto);
     break;
-  case 0xFF+4:
-    snprintf(dst, (line_buffer_len-len), "%s", proto2name(theFlow->proto));
+  case PROTOCOL_MAP:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", proto2name(theFlow->core.tuple.key.k.ipKey.proto));
     break;
-  case 5:
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     direction == src2dst_direction ? theFlow->src2dstTos : theFlow->dst2srcTos);
+  case SRC_TOS:
+    i = snprintf(dst, avail_len, "%d",
+		 (theFlow->ext == NULL) ? 0 : ((direction == src2dst_direction) ? theFlow->ext->src2dstTos : theFlow->ext->dst2srcTos));
     break;
-  case 6:
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     direction == src2dst_direction ? theFlow->src2dstTcpFlags : theFlow->dst2srcTcpFlags);
+  case TCP_FLAGS:
+    i = snprintf(dst, avail_len, "%d",
+		 (theFlow->ext == NULL) ? 0 : ((direction == src2dst_direction) ? theFlow->ext->protoCounters.tcp.src2dstTcpFlags
+					       : theFlow->ext->protoCounters.tcp.dst2srcTcpFlags));
     break;
-  case 7:
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     direction == src2dst_direction ? theFlow->sport : theFlow->dport);
+  case L4_SRC_PORT:
+    i = snprintf(dst, avail_len, "%d",
+		 direction == src2dst_direction ? theFlow->core.tuple.key.k.ipKey.sport : theFlow->core.tuple.key.k.ipKey.dport);
     break;
-  case 0xFF+7:
-    snprintf(dst, (line_buffer_len-len), "%s",
-	     port2name(direction == src2dst_direction ? theFlow->sport : theFlow->dport, theFlow->proto));
+  case L4_SRC_PORT_MAP:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s",
+		 port2name(direction == src2dst_direction ? theFlow->core.tuple.key.k.ipKey.sport : theFlow->core.tuple.key.k.ipKey.dport,
+			   theFlow->core.tuple.key.k.ipKey.proto));
     break;
-  case 8:
-  case 27:
-    snprintf(dst, (line_buffer_len-len), "%s",
-	     _intoa(direction == src2dst_direction ? theFlow->src->host : theFlow->dst->host, buf, sizeof(buf)));
+  case IPV4_SRC_ADDR:
+  case IPV6_SRC_ADDR:
+    {
+      u_int8_t ip_v = (teid == IPV4_SRC_ADDR) ? 4 : 6;
+      if(theFlow->core.tuple.key.is_ip_flow && theFlow->core.tuple.key.k.ipKey.src.ipVersion == ip_v) {
+        i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s",
+		     _intoa(direction == src2dst_direction ? theFlow->core.tuple.key.k.ipKey.src: theFlow->core.tuple.key.k.ipKey.dst, buf, sizeof(buf)));
+      } else {
+        IpAddress addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.ipVersion = ip_v;
+        i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", _intoa(addr, buf, sizeof(buf)));
+      }
+    }
     break;
-  case 9: /* IPV4_SRC_MASK */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     ip2mask((direction == src2dst_direction) ? theFlow->src->host : theFlow->dst->host));
+  case IPV4_SRC_MASK:
+    i = snprintf(dst, avail_len, "%d",
+		 ((theFlow->ext == NULL) || (!theFlow->core.tuple.key.is_ip_flow)) ? 0 :
+		 ((direction == src2dst_direction) ? ip2mask(&theFlow->core.tuple.key.k.ipKey.src, &theFlow->ext->srcInfo)
+		  : ip2mask(&theFlow->core.tuple.key.k.ipKey.dst, &theFlow->ext->dstInfo)));
     break;
-  case 10: /* INPUT_SNMP */
-    snprintf(dst, (line_buffer_len-len), "%d", (direction == src2dst_direction) ? theFlow->if_input : theFlow->if_output);
+  case INPUT_SNMP:
+    i = snprintf(dst, avail_len, "%d", (theFlow->ext == NULL) ? 0 :
+		 ((direction == src2dst_direction) ? theFlow->ext->if_input : theFlow->ext->if_output));
     break;
-  case 11:
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     direction == src2dst_direction ? theFlow->dport : theFlow->sport);
+  case L4_DST_PORT:
+    i = snprintf(dst, avail_len, "%d",
+		 direction == src2dst_direction ? theFlow->core.tuple.key.k.ipKey.dport : theFlow->core.tuple.key.k.ipKey.sport);
     break;
-  case 0xFF+11:
-    snprintf(dst, (line_buffer_len-len), "%s",
-	     port2name(direction == src2dst_direction ? theFlow->dport : theFlow->sport, theFlow->proto));
-    break;
-  case 12:
-  case 28:
-    snprintf(dst, (line_buffer_len-len), "%s",
-	     _intoa(direction == src2dst_direction ? theFlow->dst->host : theFlow->src->host, buf, sizeof(buf)));
-    break;
-  case 13: /* IPV4_DST_MASK */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     ip2mask((direction == dst2src_direction) ? theFlow->src->host : theFlow->dst->host));
-    break;
-  case 14: /* OUTPUT_SNMP */
-    snprintf(dst, (line_buffer_len-len), "%d", (direction != src2dst_direction) ? theFlow->if_input : theFlow->if_output);
-    break;
-  case 15: /* IPV4_NEXT_HOP */
-    snprintf(dst, (line_buffer_len-len), "%d", 0);
-    break;
-  case 16: /* SRC_AS */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     direction == src2dst_direction ? getAS(theFlow, 1) : getAS(theFlow, 0));
-    break;
-  case 17: /* DST_AS */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     direction == src2dst_direction ? getAS(theFlow, 0) : getAS(theFlow, 1));
-    break;
-    case 21:
-      snprintf(dst, (line_buffer_len-len), "%u",
-	       (unsigned int)(direction == src2dst_direction ? theFlow->flowTimers.lastSeenSent.tv_sec :
-			      theFlow->flowTimers.lastSeenRcvd.tv_sec));
-    break;
-  case 22:
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     (unsigned int)(direction == src2dst_direction ? theFlow->flowTimers.firstSeenSent.tv_sec :
-			    theFlow->flowTimers.firstSeenRcvd.tv_sec));
-    break;
-  case 23:
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     direction == dst2src_direction ? theFlow->flowCounters.bytesSent : theFlow->flowCounters.bytesRcvd);
-    break;
-  case 24:
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     direction == dst2src_direction ? theFlow->flowCounters.sentFragPkts : theFlow->flowCounters.rcvdFragPkts);
-    break;
-  case 29:
-  case 30:
-    snprintf(dst, (line_buffer_len-len), "%d", 0);
-    break;
-  case 32:
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     direction == src2dst_direction ? theFlow->src2dstIcmpType : theFlow->dst2srcIcmpType);
-    break;
-  case 34: /* SAMPLING INTERVAL */
-    snprintf(dst, (line_buffer_len-len), "%d", 1 /* 1:1 = no sampling */);
-    break;
-  case 35: /* SAMPLING ALGORITHM */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     0x01 /* 1=Deterministic Sampling, 0x02=Random Sampling */);
-    break;
-  case 36: /* FLOW ACTIVE TIMEOUT */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     readOnlyGlobals.lifetimeTimeout);
-    break;
-  case 37: /* FLOW INACTIVE TIMEOUT */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     readOnlyGlobals.idleTimeout);
-    break;
-  case 38:
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     readOnlyGlobals.engineType);
-    break;
-  case 39:
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     readOnlyGlobals.engineId);
-    break;
-  case 40: /* TOTAL_BYTES_EXP */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     readWriteGlobals->flowExportStats.totExportedBytes);
-    break;
-  case 41: /* TOTAL_PKTS_EXP */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     readWriteGlobals->flowExportStats.totExportedPkts);
-    break;
-  case 42: /* TOTAL_FLOWS_EXP */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     readWriteGlobals->flowExportStats.totExportedFlows);
-    break;
-  case 56: /* IN_SRC_MAC */
-    snprintf(dst, (line_buffer_len-len), "%s",
-	     direction == src2dst_direction ? etheraddr_string(theFlow->srcMacAddress, buf)
-	     : etheraddr_string(theFlow->dstMacAddress, buf));
-    break;
-  case 58: /* SRC_VLAN */
-  case 59: /* DST_VLAN */
-    snprintf(dst, (line_buffer_len-len), "%d", theFlow->vlanId);
-    break;
-  case 60: /* IP_PROTOCOL_VERSION */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     (theFlow->src->host.ipVersion == 4) && (theFlow->dst->host.ipVersion == 4) ? 4 : 6);
-    break;
-  case 61: /* Direction */
-    snprintf(dst, (line_buffer_len-len), "%d", 0);
-    break;
-  case 62: /* IPV6_NEXT_HOP */
-    snprintf(dst, (line_buffer_len-len), "[::]" /* Same as 0.0.0.0 in IPv4 */);
-    break;
-  case 70: /* MPLS: label 1 */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     mplsLabel2int(theFlow->mplsInfo, 0));
-    break;
-  case 71: /* MPLS: label 2 */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     mplsLabel2int(theFlow->mplsInfo, 1));
-    break;
-  case 72: /* MPLS: label 3 */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     mplsLabel2int(theFlow->mplsInfo, 2));
-    break;
-  case 73: /* MPLS: label 4 */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     mplsLabel2int(theFlow->mplsInfo, 3));
-    break;
-  case 74: /* MPLS: label 5 */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     mplsLabel2int(theFlow->mplsInfo, 4));
-    break;
-  case 75: /* MPLS: label 6 */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     mplsLabel2int(theFlow->mplsInfo, 5));
-    break;
-  case 76: /* MPLS: label 7 */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     mplsLabel2int(theFlow->mplsInfo, 6));
-    break;
-  case 77: /* MPLS: label 8 */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     mplsLabel2int(theFlow->mplsInfo, 7));
-    break;
-  case 78: /* MPLS: label 9 */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     mplsLabel2int(theFlow->mplsInfo, 8));
-    break;
-  case 79: /* MPLS: label 10 */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     mplsLabel2int(theFlow->mplsInfo, 9));
-    break;
-  case 80: /* OUT_DST_MAC */
-    snprintf(dst, (line_buffer_len-len), "%s",
-	     direction == src2dst_direction ? etheraddr_string(theFlow->dstMacAddress, buf)
-	     : etheraddr_string(theFlow->srcMacAddress, buf));
+  case L4_DST_PORT_MAP:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s",
+		 port2name(direction == src2dst_direction ? theFlow->core.tuple.key.k.ipKey.dport : theFlow->core.tuple.key.k.ipKey.sport,
+			   theFlow->core.tuple.key.k.ipKey.proto));
     break;
 
-  case 148: /* FLOW_ID */
-    snprintf(dst, (line_buffer_len-len), "%u", theFlow->flow_idx);
+  case L4_SRV_PORT:
+    i = snprintf(dst, avail_len, "%u", getServerPort(theFlow));
+    break;
+
+  case L4_SRV_PORT_MAP:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", port2name(getServerPort(theFlow), theFlow->core.tuple.key.k.ipKey.proto));
+    break;
+
+  case IPV4_DST_ADDR:
+  case IPV6_DST_ADDR:
+    {
+      u_int8_t ip_v = (teid == IPV4_DST_ADDR) ? 4 : 6;
+      if(theFlow->core.tuple.key.is_ip_flow && theFlow->core.tuple.key.k.ipKey.dst.ipVersion == ip_v) {
+        i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s",
+		     _intoa(direction == src2dst_direction ? theFlow->core.tuple.key.k.ipKey.dst: theFlow->core.tuple.key.k.ipKey.src, buf, sizeof(buf)));
+      } else {
+        IpAddress addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.ipVersion = ip_v;
+        i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", _intoa(addr, buf, sizeof(buf)));
+      }
+    }
+    break;
+  case IPV4_DST_MASK:
+    i = snprintf(dst, avail_len, "%d",
+		 ((theFlow->ext == NULL) || (!theFlow->core.tuple.key.is_ip_flow)) ? 0 :
+		 ((direction == dst2src_direction) ? ip2mask(&theFlow->core.tuple.key.k.ipKey.src, &theFlow->ext->srcInfo) :
+		  ip2mask(&theFlow->core.tuple.key.k.ipKey.dst, &theFlow->ext->dstInfo)));
+    break;
+  case OUTPUT_SNMP:
+    i = snprintf(dst, avail_len, "%d",
+		 (theFlow->ext == NULL) ? 0 : ((direction != src2dst_direction) ? theFlow->ext->if_input : theFlow->ext->if_output));
+    break;
+  case IPV4_NEXT_HOP:
+    if(theFlow->ext && (theFlow->ext->nextHop.ipVersion == 4))
+      i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", _intoa(theFlow->ext->nextHop, buf, sizeof(buf)));
+    else
+      i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", "0.0.0.0");
+    break;
+  case SRC_AS:
+    i = snprintf(dst, avail_len, "%d", (theFlow->ext == NULL) ? 0 :
+		 ((direction == src2dst_direction) ? getAS(&theFlow->core.tuple.key.k.ipKey.src, &theFlow->ext->srcInfo)
+		  : getAS(&theFlow->core.tuple.key.k.ipKey.dst, &theFlow->ext->dstInfo)));
+    break;
+  case DST_AS:
+    i = snprintf(dst, avail_len, "%d", (theFlow->ext == NULL) ? 0 :
+		 ((direction == src2dst_direction) ? getAS(&theFlow->core.tuple.key.k.ipKey.dst, &theFlow->ext->dstInfo)
+		  : getAS(&theFlow->core.tuple.key.k.ipKey.src, &theFlow->ext->srcInfo)));
+    break;
+  case LAST_SWITCHED:
+  case FLOW_END_SEC:
+    tv = getFlowEndTime(theFlow, direction);
+    if(json_mode)
+      i = snprintf(dst, avail_len, "%u", (unsigned int)tv->tv_sec);
+    else
+      i = formatTimestamp(tv, dst, avail_len);
+    break;
+  case FIRST_SWITCHED:
+  case FLOW_START_SEC:
+    tv = getFlowBeginTime(theFlow, direction);
+    if(json_mode)
+      i = snprintf(dst, avail_len, "%u", (unsigned int)tv->tv_sec);
+    else
+      i = formatTimestamp(tv, dst, avail_len);
+    break;
+  case OUT_BYTES:
+    i = snprintf(dst, avail_len, "%u",
+		 direction == dst2src_direction ? theFlow->core.tuple.flowCounters.bytesSent : theFlow->core.tuple.flowCounters.bytesRcvd);
+    break;
+  case OUT_PKTS:
+    i = snprintf(dst, avail_len, "%u",
+		 direction == src2dst_direction ? theFlow->core.tuple.flowCounters.pktRcvd : theFlow->core.tuple.flowCounters.pktSent);
+    break;
+  case IPV6_SRC_MASK:
+  case IPV6_DST_MASK:
+    i = snprintf(dst, avail_len, "%d", 0);
+    break;
+  case ICMP_TYPE:
+    i = snprintf(dst, avail_len, "%d",
+		 (theFlow->ext == NULL) ? 0 :
+		 (direction == src2dst_direction ? theFlow->ext->protoCounters.icmp.src2dstIcmpType : theFlow->ext->protoCounters.icmp.dst2srcIcmpType));
+    break;
+  case SAMPLING_INTERVAL:
+    i = snprintf(dst, avail_len, "%d", readOnlyGlobals.pktSampleRate /* 1:1 = no sampling */);
+    break;
+  case SAMPLING_ALGORITHM:
+    i = snprintf(dst, avail_len, "%d",
+		 0x01 /* 1=Deterministic Sampling, 0x02=Random Sampling */);
+    break;
+  case FLOW_ACTIVE_TIMEOUT:
+    i = snprintf(dst, avail_len, "%d",
+		 readOnlyGlobals.lifetimeTimeout);
+    break;
+  case FLOW_INACTIVE_TIMEOUT:
+    i = snprintf(dst, avail_len, "%d",
+		 readOnlyGlobals.idleTimeout);
+    break;
+  case ENGINE_TYPE:
+    i = snprintf(dst, avail_len, "%d",
+		 theFlow->core.engine_type);
+    break;
+  case ENGINE_ID:
+    i = snprintf(dst, avail_len, "%d",
+		 theFlow->core.engine_id);
+    break;
+  case TOTAL_BYTES_EXP:
+    i = snprintf(dst, avail_len, "%d",
+		 readWriteGlobals->flowExportStats.totExportedBytes);
+    break;
+  case TOTAL_PKTS_EXP:
+    i = snprintf(dst, avail_len, "%d",
+		 readWriteGlobals->flowExportStats.totExportedPkts);
+    break;
+  case TOTAL_FLOWS_EXP:
+    i = snprintf(dst, avail_len, "%d",
+		 readWriteGlobals->flowExportStats.totExportedFlows);
+    break;
+
+  case MIN_TTL:
+    i = snprintf(dst, avail_len, "%d",
+		 (theFlow->ext == NULL) ? 0 :
+		 (direction == src2dst_direction ? theFlow->ext->src2dstMinTTL : theFlow->ext->dst2srcMinTTL));
+    break;
+
+  case MAX_TTL:
+    i = snprintf(dst, avail_len, "%d",
+		 (theFlow->ext == NULL) ? 0 :
+		 (direction == src2dst_direction ? theFlow->ext->src2dstMaxTTL : theFlow->ext->dst2srcMaxTTL));
+    break;
+
+  case IN_SRC_MAC:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s",
+		 (theFlow->ext == NULL) ? 0 :
+		 (direction == src2dst_direction ? etheraddr_string(theFlow->ext->srcInfo.macAddress, buf)
+		  : etheraddr_string(theFlow->ext->dstInfo.macAddress, buf)));
+    break;
+  case SRC_VLAN:
+  case DST_VLAN:
+    i = snprintf(dst, avail_len, "%d", theFlow->core.tuple.key.vlanId);
+    break;
+  case IP_PROTOCOL_VERSION:
+    i = snprintf(dst, avail_len, "%d",
+		 (theFlow->core.tuple.key.k.ipKey.src.ipVersion == 4) && (theFlow->core.tuple.key.k.ipKey.dst.ipVersion == 4) ? 4 : 6);
+    break;
+  case DIRECTION: /* Flow Direction [ 0=RX, 1=TX ] */
+    i = snprintf(dst, avail_len, "%d", theFlow->core.rx_direction.src2dst == 1 /* RX */ ? 0 /* RX */: 1 /* TX */);
+    break;
+  case IPV6_NEXT_HOP:
+    if(theFlow->ext && (theFlow->ext->nextHop.ipVersion == 6))
+      i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", _intoa(theFlow->ext->nextHop, buf, sizeof(buf)));
+    else
+      i = snprintf(dst, avail_len, "[::]" /* Same as 0.0.0.0 in IPv4 */);
+    break;
+  case MPLS_LABEL_1: /* MPLS: label 1 */
+    i = snprintf(dst, avail_len, "%u",
+		 mplsLabel2int(((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 : theFlow->ext->extensions->mplsInfo, 0));
+    break;
+  case MPLS_LABEL_2: /* MPLS: label 2 */
+    i = snprintf(dst, avail_len, "%u",
+		 mplsLabel2int(((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 : theFlow->ext->extensions->mplsInfo, 1));
+    break;
+  case MPLS_LABEL_3: /* MPLS: label 3 */
+    i = snprintf(dst, avail_len, "%u",
+		 mplsLabel2int(((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 : theFlow->ext->extensions->mplsInfo, 2));
+    break;
+  case MPLS_LABEL_4: /* MPLS: label 4 */
+    i = snprintf(dst, avail_len, "%u",
+		 mplsLabel2int(((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 : theFlow->ext->extensions->mplsInfo, 3));
+    break;
+  case MPLS_LABEL_5: /* MPLS: label 5 */
+    i = snprintf(dst, avail_len, "%u",
+		 mplsLabel2int(((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 : theFlow->ext->extensions->mplsInfo, 4));
+    break;
+  case MPLS_LABEL_6: /* MPLS: label 6 */
+    i = snprintf(dst, avail_len, "%u",
+		 mplsLabel2int(((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 : theFlow->ext->extensions->mplsInfo, 5));
+    break;
+  case MPLS_LABEL_7: /* MPLS: label 7 */
+    i = snprintf(dst, avail_len, "%u",
+		 mplsLabel2int(((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 : theFlow->ext->extensions->mplsInfo, 6));
+    break;
+  case MPLS_LABEL_8: /* MPLS: label 8 */
+    i = snprintf(dst, avail_len, "%u",
+		 mplsLabel2int(((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 : theFlow->ext->extensions->mplsInfo, 7));
+    break;
+  case MPLS_LABEL_9: /* MPLS: label 9 */
+    i = snprintf(dst, avail_len, "%u",
+		 mplsLabel2int(((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 : theFlow->ext->extensions->mplsInfo, 8));
+    break;
+  case MPLS_LABEL_10: /* MPLS: label 10 */
+    i = snprintf(dst, avail_len, "%u",
+		 mplsLabel2int(((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 : theFlow->ext->extensions->mplsInfo, 9));
+    break;
+  case OUT_DST_MAC:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s",
+		 (theFlow->ext == NULL) ? 0 :
+		 (direction == src2dst_direction ? etheraddr_string(theFlow->ext->dstInfo.macAddress, buf)
+		  : etheraddr_string(theFlow->ext->srcInfo.macAddress, buf)));
+    break;
+
+  case APPLICATION_ID:
+    if(theFlow->core.l7.proto_type == NBAR2_PROTO_TYPE) {
+      u_int8_t major_proto = (theFlow->core.l7.proto.collected_application_id & 0xFF000000) >> 24;
+      u_int32_t minor_proto = theFlow->core.l7.proto.collected_application_id & 0x00FFFFFF;
+
+      /* We need the check below as the NBAR and nDPI applicationIds are shared */
+      i = snprintf(dst, avail_len, json_mode ? "\"%u:%u\"" : "%u:%u", major_proto, minor_proto);
+      } else if(theFlow->core.l7.proto_type == IXIA_PROTO_TYPE)
+      i = snprintf(dst, avail_len, json_mode ? "\"%u\"" : "%u",
+		   theFlow->core.l7.proto.collected_application_id);
+    else
+      i = snprintf(dst, avail_len, json_mode ? "\"%u\"" : "%u", 0);
+    break;
+
+  case EXPORTER_IPV4_ADDRESS:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s",
+		 _intoaV4((theFlow->ext == NULL) ? 0 : theFlow->ext->srcInfo.ifHost, buf, sizeof(buf)));
+    break;
+
+  case EXPORTER_IPV6_ADDRESS:
+    i = snprintf(dst, avail_len, "%u", 0); /* Not supported (yet) */
+    break;
+
+  case FLOW_ID:
+    if(theFlow->core.tuple.flow_serial == 0) theFlow->core.tuple.flow_serial = get_flow_serial();
+    i = snprintf(dst, avail_len, "%u", theFlow->core.tuple.flow_serial);
+    break;
+
+  case FLOW_START_MILLISECONDS:
+    tv = getFlowBeginTime(theFlow, direction);
+    i = snprintf(dst, avail_len, "%lu", (long unsigned int)(to_msec(tv)));
+    break;
+
+  case FLOW_END_MILLISECONDS:
+    tv = getFlowEndTime(theFlow, direction);
+    i = snprintf(dst, avail_len, "%lu", (long unsigned int)(to_msec(tv)));
+    break;
+
+  case BIFLOW_DIRECTION:
+    i = snprintf(dst, avail_len, "%u", (direction == src2dst_direction) ? 1 /* Initiator */ : 2 /* Reverse Initiator */);
     break;
 
     /* ************************************ */
 
     /* nProbe Extensions */
-  case NTOP_BASE_ID+80:
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     direction == src2dst_direction ? theFlow->flowCounters.sentFragPkts : theFlow->flowCounters.rcvdFragPkts);
+  case FRAGMENTS:
+    i = snprintf(dst, avail_len, "%u",
+		 (theFlow->ext == NULL) ? 0 :
+		 (direction == src2dst_direction ? theFlow->ext->flowCounters.sentFragPkts : theFlow->ext->flowCounters.rcvdFragPkts));
     break;
-#if 0
-  case NTOP_BASE_ID+81:
+
+#ifdef DEPRECATED_INFORMATION_ELEMENTS
+  case CLIENT_NW_DELAY_SEC:
+    i = snprintf(dst, avail_len, "%d",
+		 ((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 :
+		 ((int)(nwLatencyComputed(theFlow->ext) ? theFlow->ext->extensions->clientNwLatency.tv_sec : 0)));
+    break;
+  case CLIENT_NW_DELAY_USEC:
+    i = snprintf(dst, avail_len, "%u",
+		 ((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 :
+		 (nwLatencyComputed(theFlow->ext) ? (u_int32_t)theFlow->ext->extensions->clientNwLatency.tv_usec : 0));
     break;
 #endif
-  case NTOP_BASE_ID+82:
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     (int)(nwLatencyComputed(theFlow) ? theFlow->clientNwDelay.tv_sec : 0));
-    break;
-  case NTOP_BASE_ID+83:
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     nwLatencyComputed(theFlow) ? (u_int32_t)theFlow->clientNwDelay.tv_usec : 0);
-    break;
-  case NTOP_BASE_ID+84:
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     (int)(nwLatencyComputed(theFlow) ? (u_int32_t)theFlow->serverNwDelay.tv_sec : 0));
-    break;
-  case NTOP_BASE_ID+85:
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     nwLatencyComputed(theFlow) ? (u_int32_t)theFlow->serverNwDelay.tv_usec : 0);
+
+  case CLIENT_NW_LATENCY_MS:
+    i = snprintf(dst, avail_len, "%.3f",
+		 ((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 :
+		 (nwLatencyComputed(theFlow->ext) ? toMs(&theFlow->ext->extensions->clientNwLatency) : 0));
     break;
 
-  case NTOP_BASE_ID+86:
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     (u_int32_t)(applLatencyComputed(theFlow) ?
-			 (direction == src2dst_direction ? theFlow->src2dstApplLatency.tv_sec
-			  : theFlow->dst2srcApplLatency.tv_sec) : 0));
+#ifdef DEPRECATED_INFORMATION_ELEMENTS
+  case SERVER_NW_DELAY_SEC:
+    i = snprintf(dst, avail_len, "%u",
+		 ((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 :
+		 ((int)(nwLatencyComputed(theFlow->ext) ? (u_int32_t)theFlow->ext->extensions->serverNwLatency.tv_sec : 0)));
     break;
-  case NTOP_BASE_ID+87:
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     (u_int32_t)(applLatencyComputed(theFlow) ?
-			 (direction == src2dst_direction ? theFlow->src2dstApplLatency.tv_usec
-			  : theFlow->dst2srcApplLatency.tv_usec) : 0));
+  case SERVER_NW_DELAY_USEC:
+    i = snprintf(dst, avail_len, "%u",
+		 ((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 :
+		 (nwLatencyComputed(theFlow->ext) ? (u_int32_t)theFlow->ext->extensions->serverNwLatency.tv_usec : 0));
     break;
-  case NTOP_BASE_ID+IN_PAYLOAD_ID:
-  case NTOP_BASE_ID+OUT_PAYLOAD_ID:
-    {
-      int idx, len;
+#endif
 
-      if((theTemplateElement->templateElementId == IN_PAYLOAD_ID)
-	 || (theTemplateElement->templateElementId == OUT_PAYLOAD_ID))
-	len = theFlow->src2dstPayloadLen;
+  case SERVER_NW_LATENCY_MS:
+    i = snprintf(dst, avail_len, "%.3f",
+		 ((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 :
+		 (nwLatencyComputed(theFlow->ext) ? toMs(&theFlow->ext->extensions->serverNwLatency) : 0));
+    break;
+
+  case APPL_LATENCY_SEC:
+    i = snprintf(dst, avail_len, "%u",
+		 ((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 :
+		 ((u_int32_t)(applLatencyComputed(theFlow->ext) ?
+			     (direction == src2dst_direction ? theFlow->ext->extensions->src2dstApplLatency.tv_sec
+			      : theFlow->ext->extensions->dst2srcApplLatency.tv_sec) : 0)));
+    break;
+  case APPL_LATENCY_USEC:
+    i = snprintf(dst, avail_len, "%d",
+		 ((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 :
+		 ((u_int32_t)(applLatencyComputed(theFlow->ext) ?
+			     (direction == src2dst_direction ? theFlow->ext->extensions->src2dstApplLatency.tv_usec
+			      : theFlow->ext->extensions->dst2srcApplLatency.tv_usec) : 0)));
+    break;
+  case APPL_LATENCY_MS:
+    i = snprintf(dst, avail_len, "%.3f",
+		 ((theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 :
+		 ((applLatencyComputed(theFlow->ext) ?
+		  (direction == src2dst_direction ? toMs(&theFlow->ext->extensions->src2dstApplLatency)
+		   : toMs(&theFlow->ext->extensions->dst2srcApplLatency)) : 0)));
+    break;
+
+  case NUM_PKTS_UP_TO_128_BYTES:
+    if(theFlow->ext && theFlow->ext->extensions) {
+      if(readOnlyGlobals.bidirectionalFlows)
+	t = theFlow->ext->extensions->etherstats.src2dst.num_pkts_up_to_128_bytes+theFlow->ext->extensions->etherstats.dst2src.num_pkts_up_to_128_bytes;
       else
-	len = theFlow->dst2srcPayloadLen;
+	t = (direction == src2dst_direction) ? theFlow->ext->extensions->etherstats.src2dst.num_pkts_up_to_128_bytes : theFlow->ext->extensions->etherstats.dst2src.num_pkts_up_to_128_bytes;
+    } else
+      t = 0;
 
-      for(idx=0; idx<len; idx++)
-	snprintf(dst, (line_buffer_len-len), "%c",
-		 ((theTemplateElement->templateElementId == IN_PAYLOAD_ID)
-		  || (theTemplateElement->templateElementId == OUT_PAYLOAD_ID))
-		 ? theFlow->src2dstPayload[idx] : theFlow->dst2srcPayload[idx]);
-    }
-    break;
-  case NTOP_BASE_ID+98:
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     direction == src2dst_direction ? theFlow->src2dstIcmpFlags : theFlow->dst2srcIcmpFlags);
+    i = snprintf(dst, avail_len, "%d", t);
     break;
 
-  case NTOP_BASE_ID+101: /* SRC_IP_COUNTRY */
+  case NUM_PKTS_128_TO_256_BYTES:
+    if(theFlow->ext && theFlow->ext->extensions) {
+      if(readOnlyGlobals.bidirectionalFlows)
+	t = theFlow->ext->extensions->etherstats.src2dst.num_pkts_128_to_256_bytes+theFlow->ext->extensions->etherstats.dst2src.num_pkts_128_to_256_bytes;
+      else
+	t = (direction == src2dst_direction) ? theFlow->ext->extensions->etherstats.src2dst.num_pkts_128_to_256_bytes : theFlow->ext->extensions->etherstats.dst2src.num_pkts_128_to_256_bytes;
+    } else
+      t = 0;
+
+    i = snprintf(dst, avail_len, "%d", t);
+    break;
+
+  case NUM_PKTS_256_TO_512_BYTES:
+    if(theFlow->ext && theFlow->ext->extensions) {
+      if(readOnlyGlobals.bidirectionalFlows)
+	t = theFlow->ext->extensions->etherstats.src2dst.num_pkts_256_to_512_bytes+theFlow->ext->extensions->etherstats.dst2src.num_pkts_256_to_512_bytes;
+      else
+	t = (direction == src2dst_direction) ? theFlow->ext->extensions->etherstats.src2dst.num_pkts_256_to_512_bytes : theFlow->ext->extensions->etherstats.dst2src.num_pkts_256_to_512_bytes;
+    } else
+      t = 0;
+
+    i = snprintf(dst, avail_len, "%d", t);
+    break;
+
+  case NUM_PKTS_512_TO_1024_BYTES:
+    if(theFlow->ext && theFlow->ext->extensions) {
+      if(readOnlyGlobals.bidirectionalFlows)
+	t = theFlow->ext->extensions->etherstats.src2dst.num_pkts_512_to_1024_bytes+theFlow->ext->extensions->etherstats.dst2src.num_pkts_512_to_1024_bytes;
+      else
+	t = (direction == src2dst_direction) ? theFlow->ext->extensions->etherstats.src2dst.num_pkts_512_to_1024_bytes : theFlow->ext->extensions->etherstats.dst2src.num_pkts_512_to_1024_bytes;
+    } else
+      t = 0;
+
+    i = snprintf(dst, avail_len, "%d", t);
+    break;
+
+  case NUM_PKTS_1024_TO_1514_BYTES:
+    if(theFlow->ext && theFlow->ext->extensions) {
+      if(readOnlyGlobals.bidirectionalFlows)
+	t = theFlow->ext->extensions->etherstats.src2dst.num_pkts_1024_to_1514_bytes+theFlow->ext->extensions->etherstats.dst2src.num_pkts_1024_to_1514_bytes;
+      else
+	t = (direction == src2dst_direction) ? theFlow->ext->extensions->etherstats.src2dst.num_pkts_1024_to_1514_bytes : theFlow->ext->extensions->etherstats.dst2src.num_pkts_1024_to_1514_bytes;
+    } else
+      t = 0;
+
+    i = snprintf(dst, avail_len, "%d", t);
+    break;
+
+  case NUM_PKTS_OVER_1514_BYTES:
+    if(theFlow->ext && theFlow->ext->extensions) {
+      if(readOnlyGlobals.bidirectionalFlows)
+	t = theFlow->ext->extensions->etherstats.src2dst.num_pkts_over_1514_bytes+theFlow->ext->extensions->etherstats.dst2src.num_pkts_over_1514_bytes;
+      else
+	t = (direction == src2dst_direction) ? theFlow->ext->extensions->etherstats.src2dst.num_pkts_over_1514_bytes : theFlow->ext->extensions->etherstats.dst2src.num_pkts_over_1514_bytes;
+    } else
+      t = 0;
+
+    i = snprintf(dst, avail_len, "%d", t);
+    break;
+
+  case CUMULATIVE_ICMP_TYPE:
+    i = snprintf(dst, avail_len, "%d",
+		 (theFlow->ext == NULL) ? 0 :
+		 (direction == src2dst_direction ? theFlow->ext->protoCounters.icmp.src2dstIcmpFlags : theFlow->ext->protoCounters.icmp.dst2srcIcmpFlags));
+    break;
+
+  case SRC_IP_COUNTRY:
 #ifdef HAVE_GEOIP
-    geo = (direction == src2dst_direction) ? theFlow->src->geo : theFlow->dst->geo;
+    geo = (direction == src2dst_direction) ? theFlow->ext->srcInfo.geo : theFlow->ext->dstInfo.geo;
+    country = (geo && geo->country_code) ? geo->country_code : NULL;
+#else
+    country = (direction == src2dst_direction) ? theFlow->ext->srcInfo.collected_country_code : theFlow->ext->dstInfo.collected_country_code;
 #endif
-    snprintf(dst, (line_buffer_len-len), "%s",
+    
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", country ? country : "");
+    break;
+
+  case SRC_IP_CITY:
 #ifdef HAVE_GEOIP
-	     (geo && geo->country_code) ? geo->country_code :
+    geo = (direction == src2dst_direction) ? theFlow->ext->srcInfo.geo : theFlow->ext->dstInfo.geo;
+    city = (geo && geo->city) ? geo->city : NULL;
+#else
+    city = (direction == src2dst_direction) ? theFlow->ext->srcInfo.collected_city : theFlow->ext->dstInfo.collected_city;
 #endif
-	     "");
+    
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", city ? city : "");
     break;
 
-  case NTOP_BASE_ID+102: /* SRC_IP_CITY */
+  case DST_IP_COUNTRY:
 #ifdef HAVE_GEOIP
-    geo = (direction == src2dst_direction) ? theFlow->src->geo : theFlow->dst->geo;
+    geo = (direction == src2dst_direction) ? theFlow->ext->dstInfo.geo : theFlow->ext->srcInfo.geo;
+    country = (geo && geo->country_code) ? geo->country_code : NULL;
+#else
+    country = (direction == src2dst_direction) ? theFlow->ext->dstInfo.collected_country_code : theFlow->ext->srcInfo.collected_country_code;
 #endif
-    snprintf(dst, (line_buffer_len-len), "%s",
+    
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", country ? country : "");
+    break;
+
+  case DST_IP_CITY:
 #ifdef HAVE_GEOIP
-	     (geo && geo->city) ? geo->city :
+    geo = (direction == src2dst_direction) ? theFlow->ext->dstInfo.geo : theFlow->ext->srcInfo.geo;
+    city = (geo && geo->city) ? geo->city : NULL;
+#else
+    city = (direction == src2dst_direction) ? theFlow->ext->dstInfo.collected_city : theFlow->ext->srcInfo.collected_city;
 #endif
-	     "");
+    
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", city ? city : "");
     break;
 
-  case NTOP_BASE_ID+103: /* DST_IP_COUNTRY */
-#ifdef HAVE_GEOIP
-    geo = (direction == src2dst_direction) ? theFlow->dst->geo : theFlow->src->geo;
-#endif
-    snprintf(dst, (line_buffer_len-len), "%s",
-#ifdef HAVE_GEOIP
-	     (geo && geo->country_code) ? geo->country_code :
-#endif
-	     "");
+  case FLOW_PROTO_PORT:
+    i = snprintf(dst, avail_len, "%u", getFlowApplProtocol(theFlow));
     break;
 
-  case NTOP_BASE_ID+104: /* DST_IP_CITY */
-#ifdef HAVE_GEOIP
-    geo = (direction == src2dst_direction) ? theFlow->dst->geo : theFlow->src->geo;
-#endif
-    snprintf(dst, (line_buffer_len-len), "%s",
-#ifdef HAVE_GEOIP
-	     (geo && geo->city) ? geo->city :
-#endif
-	     "");
+  case UPSTREAM_TUNNEL_ID:
+    i = snprintf(dst, avail_len, "%08X", (theFlow->ext == NULL) ? 0 : theFlow->ext->src2dst_tunnel_id);
     break;
 
-  case NTOP_BASE_ID+105: /* FLOW_PROTO_PORT */
-    snprintf(dst, (line_buffer_len-len), "%u", getFlowApplProtocol(theFlow));
+  case LONGEST_FLOW_PKT:
+    i = snprintf(dst, avail_len, "%u",
+		 (theFlow->ext == NULL) ? 0 : theFlow->ext->flowCounters.pktSize.longest);
     break;
 
-  case NTOP_BASE_ID+106: /* TUNNEL_ID */
-    snprintf(dst, (line_buffer_len-len), "%u", theFlow->tunnel_id);
+  case SHORTEST_FLOW_PKT:
+    i = snprintf(dst, avail_len, "%u",
+		 (theFlow->ext == NULL) ? 0 : theFlow->ext->flowCounters.pktSize.shortest);
     break;
 
-  case NTOP_BASE_ID+107: /* LONGEST_FLOW_PKT */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     theFlow->flowCounters.pktSize.longest);
+  case RETRANSMITTED_IN_BYTES:
+    i = snprintf(dst, avail_len, "%u",
+		 (theFlow->ext == NULL) ? 0 :
+		 (direction == dst2src_direction ? theFlow->ext->protoCounters.tcp.bytesRcvdRetransmitted :
+		 theFlow->ext->protoCounters.tcp.bytesSentRetransmitted));
     break;
 
-  case NTOP_BASE_ID+108: /* SHORTEST_FLOW_PKT */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     theFlow->flowCounters.pktSize.shortest);
+  case RETRANSMITTED_IN_PKTS:
+    i = snprintf(dst, avail_len, "%u",
+		 (theFlow->ext == NULL) ? 0 :
+		 ((direction == dst2src_direction) ? theFlow->ext->protoCounters.tcp.pktRcvdRetransmitted :
+		  theFlow->ext->protoCounters.tcp.pktSentRetransmitted));
     break;
 
-  case NTOP_BASE_ID+109: /* RETRANSMITTED_IN_PKTS */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     (direction == dst2src_direction) ? theFlow->flowCounters.tcpPkts.rcvdRetransmitted :
-	     theFlow->flowCounters.tcpPkts.sentRetransmitted);
+  case RETRANSMITTED_OUT_BYTES:
+    i = snprintf(dst, avail_len, "%u",
+		 (theFlow->ext == NULL) ? 0 :
+		 (direction == src2dst_direction ? theFlow->ext->protoCounters.tcp.bytesRcvdRetransmitted :
+		 theFlow->ext->protoCounters.tcp.bytesSentRetransmitted));
     break;
 
-  case NTOP_BASE_ID+110: /* RETRANSMITTED_OUT_PKTS */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     (direction == src2dst_direction) ? theFlow->flowCounters.tcpPkts.rcvdRetransmitted :
-	     theFlow->flowCounters.tcpPkts.sentRetransmitted);
+  case RETRANSMITTED_OUT_PKTS:
+    i = snprintf(dst, avail_len, "%u",
+		 (theFlow->ext == NULL) ? 0 :
+		 ((direction == src2dst_direction) ? theFlow->ext->protoCounters.tcp.pktRcvdRetransmitted :
+		  theFlow->ext->protoCounters.tcp.pktSentRetransmitted));
     break;
 
-  case NTOP_BASE_ID+111: /* OOORDER_IN_PKTS */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     (direction == dst2src_direction) ? theFlow->flowCounters.tcpPkts.rcvdOOOrder :
-	     theFlow->flowCounters.tcpPkts.sentOOOrder);
+  case OOORDER_IN_PKTS:
+    i = snprintf(dst, avail_len, "%u",
+		 ((theFlow->ext == NULL) ? 0 :
+		 (direction == dst2src_direction) ? theFlow->ext->protoCounters.tcp.rcvdOOOrder :
+		  theFlow->ext->protoCounters.tcp.sentOOOrder));
     break;
 
-  case NTOP_BASE_ID+112: /* OOORDER_OUT_PKTS */
-    snprintf(dst, (line_buffer_len-len), "%u",
-	     (direction == src2dst_direction) ? theFlow->flowCounters.tcpPkts.rcvdOOOrder :
-	     theFlow->flowCounters.tcpPkts.sentOOOrder);
+  case OOORDER_OUT_PKTS:
+    i = snprintf(dst, avail_len, "%u",
+		 (theFlow->ext == NULL) ? 0 :
+		 ((direction == src2dst_direction) ? theFlow->ext->protoCounters.tcp.rcvdOOOrder :
+		  theFlow->ext->protoCounters.tcp.sentOOOrder));
     break;
 
-  case NTOP_BASE_ID+113: /* UNTUNNELED_PROTOCOL */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     (readOnlyGlobals.tunnel_mode == 0) ? 0 : theFlow->untunneled.proto);
+  case UNTUNNELED_PROTOCOL:
+    i = snprintf(dst, avail_len, "%d",
+		 ((readOnlyGlobals.tunnel_mode == 0) || (theFlow->ext == NULL) || (theFlow->ext->extensions == NULL)) ? 0 : theFlow->ext->extensions->untunneled.proto);
     break;
 
-  case NTOP_BASE_ID+114: /* UNTUNNELED_IPV4_SRC_ADDR */
-    snprintf(dst, (line_buffer_len-len), "%s",
-	     ((readOnlyGlobals.tunnel_mode == 0) || (theFlow->untunneled.proto == 0)) ? "" :
-	     (_intoa(direction == src2dst_direction ? theFlow->untunneled.src->host :
-		     theFlow->untunneled.dst->host, buf, sizeof(buf))));
+  case UNTUNNELED_IPV4_SRC_ADDR:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s",
+		 ((readOnlyGlobals.tunnel_mode == 0)
+		  || (theFlow->ext == NULL)
+		  || (theFlow->ext->extensions == NULL)
+		  || (!theFlow->core.tuple.key.is_ip_flow)
+		  || (theFlow->ext->extensions->untunneled.proto == 0)) ? "" :
+		 (_intoa(direction == src2dst_direction ? theFlow->ext->extensions->untunneled.src :
+			 theFlow->ext->extensions->untunneled.dst, buf, sizeof(buf))));
     break;
 
-  case NTOP_BASE_ID+115: /* UNTUNNELED_L4_SRC_PORT */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     (readOnlyGlobals.tunnel_mode == 0) ? 0 :
-	     (direction == src2dst_direction ? theFlow->untunneled.sport : theFlow->untunneled.dport));
+  case UNTUNNELED_L4_SRC_PORT:
+    i = snprintf(dst, avail_len, "%d",
+		 ((theFlow->ext == NULL)
+		  || (theFlow->ext->extensions == NULL)
+		  || (readOnlyGlobals.tunnel_mode == 0)
+		  || (!theFlow->core.tuple.key.is_ip_flow)) ? 0 :
+		 ((direction == src2dst_direction) ? theFlow->ext->extensions->untunneled.sport : theFlow->ext->extensions->untunneled.dport));
     break;
 
-  case NTOP_BASE_ID+116: /* UNTUNNELED_IPV4_DST_ADDR */
-    snprintf(dst, (line_buffer_len-len), "%s",
-	     ((readOnlyGlobals.tunnel_mode == 0) || (theFlow->untunneled.proto == 0)) ? "" :
-	     (_intoa(direction == src2dst_direction ? theFlow->untunneled.dst->host :
-		     theFlow->untunneled.src->host, buf, sizeof(buf))));
+  case UNTUNNELED_IPV4_DST_ADDR:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s",
+		 ((readOnlyGlobals.tunnel_mode == 0)
+		  || (theFlow->ext == NULL)
+		  || (theFlow->ext->extensions == NULL)
+		  || (!theFlow->core.tuple.key.is_ip_flow)
+		  || (theFlow->ext->extensions->untunneled.proto == 0)) ? "" :
+		 (_intoa(direction == src2dst_direction ? theFlow->ext->extensions->untunneled.dst :
+			 theFlow->ext->extensions->untunneled.src, buf, sizeof(buf))));
     break;
 
-  case NTOP_BASE_ID+117: /* UNTUNNELED_L4_DST_PORT */
-    snprintf(dst, (line_buffer_len-len), "%d",
-	     (readOnlyGlobals.tunnel_mode == 0) ? 0 :
-	     (direction == src2dst_direction ? theFlow->untunneled.dport : theFlow->untunneled.sport));
+  case UNTUNNELED_L4_DST_PORT:
+    i = snprintf(dst, avail_len, "%d",
+		 ((readOnlyGlobals.tunnel_mode == 0)
+		  || (theFlow->ext == NULL)
+		  || (theFlow->ext->extensions == NULL)
+		  || (!theFlow->core.tuple.key.is_ip_flow)) ? 0 :
+		 (direction == src2dst_direction ? theFlow->ext->extensions->untunneled.dport :
+		  theFlow->ext->extensions->untunneled.sport));
+    break;
+
+  case L7_PROTO:
+    i = snprintf(dst, avail_len, "%d",
+		 (theFlow->core.l7.proto_type == NDPI_PROTO_TYPE) ?
+		 theFlow->core.l7.proto.ndpi.ndpi_proto : 0);
+    break;
+
+  case L7_PROTO_NAME:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s",
+		 (theFlow->core.l7.proto_type == NDPI_PROTO_TYPE) ?
+		 getProtoName(theFlow->core.l7.proto.ndpi.ndpi_proto) :
+		 getProtoName(NDPI_PROTOCOL_UNKNOWN));
+    break;
+
+  case DOWNSTREAM_TUNNEL_ID:
+    i = snprintf(dst, avail_len, "%08X", (theFlow->ext == NULL) ? 0 : theFlow->ext->dst2src_tunnel_id);
+    break;
+
+  case FLOW_USER_NAME:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s",
+		 theFlow->core.user.username ? theFlow->core.user.username : "");
+    break;
+
+  case FLOW_SERVER_NAME:
+    mapServerName(theFlow);
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s",
+		 theFlow->core.server.name ? theFlow->core.server.name : "");
+    break;
+
+  case PLUGIN_NAME:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", pluginEntryPoint ? pluginEntryPoint->short_name : "");
+    break;
+
+  case NUM_PKTS_TTL_EQ_1:
+    i = snprintf(dst, avail_len, "%u", (theFlow->ext && theFlow->ext->extensions) ?
+		 (direction == src2dst_direction ? theFlow->ext->extensions->ttlstats.src2dst.num_pkts_eq_1 :
+		  theFlow->ext->extensions->ttlstats.dst2src.num_pkts_eq_1) : 0);
+    break;
+
+  case NUM_PKTS_TTL_2_5:
+    i = snprintf(dst, avail_len, "%u", (theFlow->ext && theFlow->ext->extensions) ?
+		 (direction == src2dst_direction ? theFlow->ext->extensions->ttlstats.src2dst.num_pkts_2_5 :
+						       theFlow->ext->extensions->ttlstats.dst2src.num_pkts_2_5) : 0);
+    break;
+
+  case NUM_PKTS_TTL_5_32:
+    i = snprintf(dst, avail_len, "%u", (theFlow->ext && theFlow->ext->extensions) ?
+		 (direction == src2dst_direction ? theFlow->ext->extensions->ttlstats.src2dst.num_pkts_5_32 :
+		  theFlow->ext->extensions->ttlstats.dst2src.num_pkts_5_32) : 0);
+    break;
+
+  case NUM_PKTS_TTL_32_64:
+    i = snprintf(dst, avail_len, "%u", (theFlow->ext && theFlow->ext->extensions) ?
+		 (direction == src2dst_direction ? theFlow->ext->extensions->ttlstats.src2dst.num_pkts_32_64 :
+		  theFlow->ext->extensions->ttlstats.dst2src.num_pkts_32_64) : 0);
+    break;
+
+  case NUM_PKTS_TTL_64_96:
+    i = snprintf(dst, avail_len, "%u", (theFlow->ext && theFlow->ext->extensions) ?
+		 (direction == src2dst_direction ? theFlow->ext->extensions->ttlstats.src2dst.num_pkts_64_96 :
+						       theFlow->ext->extensions->ttlstats.dst2src.num_pkts_64_96) : 0);
+    break;
+
+  case NUM_PKTS_TTL_96_128:
+    i = snprintf(dst, avail_len, "%u", (theFlow->ext && theFlow->ext->extensions) ?
+		 (direction == src2dst_direction ? theFlow->ext->extensions->ttlstats.src2dst.num_pkts_96_128 :
+						       theFlow->ext->extensions->ttlstats.dst2src.num_pkts_96_128) : 0);
+    break;
+
+  case NUM_PKTS_TTL_128_160:
+    i = snprintf(dst, avail_len, "%u", (theFlow->ext && theFlow->ext->extensions) ?
+		 (direction == src2dst_direction ? theFlow->ext->extensions->ttlstats.src2dst.num_pkts_128_160 :
+						       theFlow->ext->extensions->ttlstats.dst2src.num_pkts_128_160) : 0);
+    break;
+
+  case NUM_PKTS_TTL_160_192:
+    i = snprintf(dst, avail_len, "%u", (theFlow->ext && theFlow->ext->extensions) ?
+		 (direction == src2dst_direction ? theFlow->ext->extensions->ttlstats.src2dst.num_pkts_160_192 :
+						       theFlow->ext->extensions->ttlstats.dst2src.num_pkts_160_192) : 0);
+    break;
+
+  case NUM_PKTS_TTL_192_224:
+    i = snprintf(dst, avail_len, "%u", (theFlow->ext && theFlow->ext->extensions) ?
+		 (direction == src2dst_direction ? theFlow->ext->extensions->ttlstats.src2dst.num_pkts_192_224 :
+						       theFlow->ext->extensions->ttlstats.dst2src.num_pkts_192_224) : 0);
+    break;
+
+  case NUM_PKTS_TTL_224_255:
+    i = snprintf(dst, avail_len, "%u", (theFlow->ext && theFlow->ext->extensions) ?
+		 (direction == src2dst_direction ? theFlow->ext->extensions->ttlstats.src2dst.num_pkts_224_255 :
+						       theFlow->ext->extensions->ttlstats.dst2src.num_pkts_224_255) : 0);
+    break;
+
+  case IN_SRC_OSI_SAP:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", (theFlow->ext && theFlow->ext->extensions && theFlow->ext->extensions->osi.ssap) ? theFlow->ext->extensions->osi.ssap : "");
+    break;
+
+  case OUT_DST_OSI_SAP:
+    i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", (theFlow->ext && theFlow->ext->extensions && theFlow->ext->extensions->osi.dsap) ? theFlow->ext->extensions->osi.dsap : "");
+    break;
+
+  case DURATION_CLI_SRV:
+    i = snprintf(dst, avail_len, "%u", (unsigned int) msTimeDiff(&theFlow->core.tuple.flowTimers.lastSeenSent, &theFlow->core.tuple.flowTimers.firstSeenSent));
+    break;
+
+  case DURATION_SRV_CLI:
+    i = snprintf(dst, avail_len, "%u", (unsigned int) msTimeDiff(&theFlow->core.tuple.flowTimers.lastSeenRcvd, &theFlow->core.tuple.flowTimers.firstSeenRcvd));
     break;
 
   default:
-    checkPluginPrint(theTemplateElement, direction, theFlow,
-		     line_buffer, line_buffer_len);
+    if((i = checkPluginPrint(theTemplateElement, direction, theFlow, dst, avail_len, json_mode)) == -1) {
+      char *val = "";
+
+      /* In JSON mode we do not add any default value as we better avoid sending this field */
+      if(json_mode)
+	return(0);
+
+      if(unlikely(readOnlyGlobals.enable_debug))
+	traceEvent(TRACE_WARNING, "Unable to find '%s' element in the flow being dumped: searching a default value",
+		   theTemplateElement->netflowElementName);
+
+      if(strcmp(theTemplateElement->netflowElementName, "RTP_OUT_PAYLOAD_TYPE") == 0)
+	val = "-1";
+      else {
+	switch(theTemplateElement->fileDumpFormat) {
+	case dump_as_uint:
+	case dump_as_formatted_uint:
+	case dump_as_ip_proto:
+	case dump_as_ip_port:
+	case dump_as_epoch:
+	case dump_as_tcp_flags:
+	case dump_as_hex:
+	  val = NPROBE_UNKNOWN_VALUE_STR;
+	  break;
+	case dump_as_ipv4_address:
+	  val = "0.0.0.0";
+	  break;
+	case dump_as_ipv6_address:
+	  val = "::";
+	  break;
+	case dump_as_mac_address:
+	  val = "00:00:00:00:00:00";
+	  break;
+	case dump_as_bool:
+	  val = "false";
+	  break;
+	case dump_as_ascii:
+	  val = "";
+	  break;
+	}
+      }
+
+      i = snprintf(dst, avail_len, json_mode ? "\"%s\"" : "%s", val);
+    }
+  }
+
+  /* If value is empty do not add anything here such an empty value */
+  if(i == 0) return(0);
+
+  ret += i;
+
+  if(json_mode) {
+    dst = &line_buffer[ret], avail_len -= i;
+
+    if(avail_len == 0) return(ret);
+    i = snprintf(dst, avail_len, "%s", add_quote ? "\"" : "");
+    ret += i;
   }
 
 #ifdef DEBUG
   traceEvent(TRACE_INFO, "name=%s/Id=%d\n",
-	     theTemplateElement->templateElementName,
-	     theTemplateElement->templateElementId);
+	     theTemplateElement->netflowElementName,
+	     teid);
 #endif
+
+  return(ret);
 }
 
 /* ******************************************** */
 
-void flowPrintf(V9V10TemplateElementId **templateList,
-		u_int8_t ipv4_template, char *outBuffer,
-		uint *outBufferBegin, uint *outBufferMax,
-		int *numElements, char buildTemplate,
-		FlowHashBucket *theFlow, FlowDirection direction,
-		int addTypeLen, int optionTemplate) {
-  int idx = 0;
+void flowBufferPrintf(V9V10TemplateElementId **templateList,
+		      PluginEntryPoint *pluginEntryPoint,
+		      FlowHashBucket *theFlow,
+		      FlowDirection direction,
+		      char *line_buffer,
+		      u_int line_buffer_len,
+		      u_int8_t json_mode) {
+  u_int idx = 0, len;
 
-  (*numElements) = 0;
+  if(json_mode)
+    line_buffer[0] = '{', line_buffer_len -= 1, len = 1;
+  else
+    len = 0;
 
   while(templateList[idx] != NULL) {
-    handleTemplate(templateList[idx], ipv4_template,
-		   outBuffer, outBufferBegin, outBufferMax,
-		   buildTemplate, numElements,
-		   theFlow, direction, addTypeLen,
-		   optionTemplate);
+    u_int initial_len = len, i;
+
+    if(len > line_buffer_len) {
+      traceEvent(TRACE_WARNING, "INTERNAL ERROR on %s() [len=%u][line_buffer_len=%u]",
+		 __FUNCTION__, len, line_buffer_len);
+      break;
+    }
+
+    if(idx > 0) {
+      if(json_mode)
+	len += snprintf(&line_buffer[len], line_buffer_len-len, ",");
+      else if(readOnlyGlobals.dumpFormat == sqlite_format)
+	len += snprintf(&line_buffer[len], line_buffer_len-len, "','");
+      else
+	len += snprintf(&line_buffer[len], line_buffer_len-len, "%s",
+			readOnlyGlobals.csv_separator);
+    }
+
+    i = printRecordWithTemplate(templateList[idx], pluginEntryPoint,
+				&line_buffer[len],
+				line_buffer_len-len, theFlow, direction,
+				json_mode);
+
+    if(i > 0) {
+      if((len + i) > line_buffer_len) {
+        traceEvent(TRACE_WARNING, "%s(%s): INTERNAL ERROR [len: %u][i: %u]",
+                   __FUNCTION__, templateList[idx]->netflowElementName, len, i);
+      }
+
+      len += i;
+    } else if(json_mode)
+      len = initial_len; /* Do not export in JSON empty elements */
+
     idx++;
+  }
+
+  if(json_mode) {
+    line_buffer[len] = '}', line_buffer[len+1] = '\0';
   }
 }
 
 /* ******************************************** */
 
 void flowFilePrintf(V9V10TemplateElementId **templateList,
-		    FILE *stream, FlowHashBucket *theFlow, FlowDirection direction) {
-  int idx = 0;
+		    PluginEntryPoint *pluginEntryPoint,
+		    FILE *stream, FlowHashBucket *theFlow,
+		    FlowDirection direction) {
   char line_buffer[2048] = { '\0' };
+  u_int line_buffer_len = sizeof(line_buffer);
 
   readWriteGlobals->sql_row_idx++;
   if(readOnlyGlobals.dumpFormat == sqlite_format)
     snprintf(&line_buffer[strlen(line_buffer)],
-	     sizeof(line_buffer), "insert into flows values ('");
+	     line_buffer_len, "insert into flows values ('");
 
-  while(templateList[idx] != NULL) {
-    if(idx > 0) {
-      if(readOnlyGlobals.dumpFormat == sqlite_format)
-	snprintf(&line_buffer[strlen(line_buffer)], sizeof(line_buffer), "','");
-      else
-	snprintf(&line_buffer[strlen(line_buffer)], sizeof(line_buffer), "%s",
-		 readOnlyGlobals.csv_separator);
-    }
-
-    printRecordWithTemplate(templateList[idx], line_buffer,
-			    sizeof(line_buffer), theFlow, direction);
-    idx++;
-  }
+  flowBufferPrintf(templateList, pluginEntryPoint,
+		   theFlow, direction,
+		   line_buffer, line_buffer_len,
+		   0 /* No JSON */);
 
   if(readOnlyGlobals.dumpFormat == sqlite_format) {
-    snprintf(&line_buffer[strlen(line_buffer)], sizeof(line_buffer), "');");
+    snprintf(&line_buffer[strlen(line_buffer)], line_buffer_len, "');");
 #ifdef HAVE_SQLITE
     sqlite_exec_sql(line_buffer);
 #endif
@@ -1959,140 +1672,29 @@ void flowFilePrintf(V9V10TemplateElementId **templateList,
     fprintf(stream, "%s\n", line_buffer);
 }
 
-/* ******************************************** */
+/* ****************************************************** */
 
-void compileTemplate(char *_fmt, V9V10TemplateElementId **templateList, int templateElements) {
-  int idx=0, endIdx, i, templateIdx, len = strlen(_fmt);
-  char fmt[1024], tmpChar, found;
-  u_int8_t ignored;
-
-  /* Change \n and \r (if any) to space */
-  for(i=0; _fmt[i] != '\0'; i++) {
-    switch(_fmt[i]) {
-    case '\r':
-    case '\n':
-      _fmt[i] = ' ';
-      break;
-    }
-  }
-
-  templateIdx = 0;
-  snprintf(fmt, sizeof(fmt), "%s", _fmt);
-
-  while((idx < len) && (fmt[idx] != '\0')) {	/* scan format string characters */
-    switch(fmt[idx]) {
-    case '%':	        /* special format follows */
-      endIdx = ++idx;
-      while(fmt[endIdx] != '\0') {
-	if((fmt[endIdx] == ' ') || (fmt[endIdx] == '%'))
-	  break;
-	else
-	  endIdx++;
-      }
-
-      if((endIdx == (idx+1)) && (fmt[endIdx] == '\0')) return;
-      tmpChar = fmt[endIdx]; fmt[endIdx] = '\0';
-
-      ignored = 0;
-
-      if(strstr(&fmt[idx], "MYSQL")) readOnlyGlobals.enableMySQLPlugin = 1;
-
-      if(strstr(&fmt[idx], "_COUNTRY") || strstr(&fmt[idx], "_CITY")) {
-#ifdef HAVE_GEOIP
-	if(readOnlyGlobals.geo_ip_city_db == NULL) {
-	  traceEvent(TRACE_WARNING, "Geo-location requires --city-list to be specified: ignored %s", &fmt[idx]);
-	  ignored = 1;
-	}
-#else
-	ignored = 1;
-#endif
-      }
-
-      /* traceEvent(TRACE_WARNING, "Checking '%s' [ignored=%d]", &fmt[idx], ignored); */
-
-      if(!ignored) {
-	int duplicate_found = 0;
-
-	i = 0, found = 0;
-
-	while(ver9_templates[i].templateElementName != NULL) {
-	  if((strcmp(&fmt[idx], ver9_templates[i].templateElementName) == 0)
-	     || ((strncmp(ver9_templates[i].templateElementName, &fmt[idx], 
-			  strlen(ver9_templates[i].templateElementName)) == 0) 
-		 && (ver9_templates[i].variableFieldLength == VARIABLE_FIELD_LEN))
-	     ) {
-	    int j;
-
-	    for(j=0; j<templateIdx; j++) {
-	      if(templateList[j] == &ver9_templates[i]) {
-		traceEvent(TRACE_INFO, "Duplicate template element found %s: skipping", &fmt[idx]);
-		duplicate_found = 1;
-		break;
-	      }
-	    }
-
-	    if(!duplicate_found) {
-	      templateList[templateIdx++] = &ver9_templates[i];
-	      if(ver9_templates[i].useLongSnaplen) readOnlyGlobals.snaplen = PCAP_LONG_SNAPLEN;
-	      found = 1;
-	    }
-
-	    break;
-	  }
-
-	  /* traceEvent(TRACE_WARNING, "Checking [%s][%s][found=%d]", &fmt[idx], ver9_templates[i].templateElementName, found); */
-
-	  i++;
-	}
-
-	if(!duplicate_found) {
-	  /* traceEvent(TRACE_WARNING, "Checking [%s][found=%d]", &fmt[idx], found); */
-
-	  if(!found) {
-	    if((templateList[templateIdx] = getPluginTemplate(&fmt[idx])) != NULL) {
-	      if(templateList[templateIdx]->useLongSnaplen) readOnlyGlobals.snaplen = PCAP_LONG_SNAPLEN;
-	      templateIdx++;
-	    } else {
-	      traceEvent(TRACE_WARNING, "Unable to locate template '%s'. Discarded.", &fmt[idx]);
-	    }
-	  }
-
-	  if(templateIdx >= (templateElements-1)) {
-	    traceEvent(TRACE_WARNING, "Unable to add further template elements (%d).", templateIdx);
-	    break;
-	  }
-	}
-      }
-
-      fmt[endIdx] = tmpChar;
-      if(tmpChar == '%')
-	idx = endIdx;
-      else
-	idx = endIdx+1;
-      break;
-
-    default:
-      idx++;
-      break;
-    }
-  }
-
-  templateList[templateIdx] = NULL;
+double toMs(struct timeval *t) {
+  return(((double)t->tv_sec)*1000+((double)t->tv_usec)/1000);
 }
 
-/* ******************************************** */
+/* ****************************************************** */
 
-double toMs(struct timeval theTime) {
-  return((double)theTime.tv_sec+((double)theTime.tv_usec)/1000000);
+/* Same as msTimeDiff with float */
+float timevalDiff(struct timeval *end, struct timeval *begin) {
+  if((end->tv_sec == 0) && (end->tv_usec == 0))
+    return(0);
+  else {
+    float f = (end->tv_sec-begin->tv_sec)*1000+((float)(end->tv_usec-begin->tv_usec))/(float)1000;
+
+    return((f < 0) ? 0 : f);
+  }
 }
 
 /* ****************************************************** */
 
 u_int32_t msTimeDiff(struct timeval *end, struct timeval *begin) {
-  if((end->tv_sec == 0) && (end->tv_usec == 0))
-    return(0);
-  else
-    return((end->tv_sec-begin->tv_sec)*1000+(end->tv_usec-begin->tv_usec)/1000);
+  return((u_int32_t)timevalDiff(end, begin));
 }
 
 /* ****************************************************** */
@@ -2208,8 +1810,21 @@ int signalCondvar(ConditionalVariable *condvarId, int broadcast) {
 unsigned int ntop_sleep(unsigned int secs) {
   unsigned int unsleptTime = secs, rest;
 
+#ifndef WIN32
+  sigset_t sigset, oldset;
+
+  sigfillset(&sigset);
+  pthread_sigmask(SIG_BLOCK, &sigset, &oldset);
+#endif
+
+  //   traceEvent(TRACE_NORMAL, "%s(%d)", __FUNCTION__, secs);
+
   while((rest = sleep(unsleptTime)) > 0)
     unsleptTime = rest;
+
+#ifndef WIN32
+  pthread_sigmask(SIG_SETMASK, &oldset, NULL);
+#endif
 
   return(secs);
 }
@@ -2222,7 +1837,7 @@ FlowHashBucket* getListHead(FlowHashBucket **list) {
   if(bkt == NULL)
     traceEvent(TRACE_ERROR, "INTERNAL ERROR: getListHead is empty");
   else
-    (*list) = bkt->next;
+    (*list) = bkt->core.hash.next;
 
   return(bkt);
 }
@@ -2230,7 +1845,13 @@ FlowHashBucket* getListHead(FlowHashBucket **list) {
 /* ******************************************* */
 
 void addToList(FlowHashBucket *bkt, FlowHashBucket **list) {
-  bkt->next = *list;
+  if(*list)
+    (*list)->core.hash.prev = bkt;
+
+  if(bkt == *list)
+    traceEvent(TRACE_ERROR, "INTERNAL ERROR: loop detected");
+
+  bkt->core.hash.next = *list, bkt->core.hash.prev = NULL;
   (*list) = bkt;
 }
 
@@ -2278,10 +1899,15 @@ void daemonize(void) {
     traceEvent(TRACE_INFO, "DEBUG: after fork() in %s (%d)",
 	       childpid ? "parent" : "child", childpid);
 #endif
-    if(!childpid) { /* child */
+    if(!childpid) {
+      /* child */
       traceEvent(TRACE_INFO, "INIT: Bye bye: I'm becoming a daemon...");
+#ifdef HAVE_ZMQ
+      if(readOnlyGlobals.zmq.daemon == 1) initZMQ(); /* Time to create a ZMQ socket */
+#endif
       detachFromTerminal(1);
-    } else { /* father */
+    } else {
+      /* father */
       traceEvent(TRACE_INFO, "INIT: Parent process is exiting (this is normal)");
       exit(0);
     }
@@ -2409,9 +2035,13 @@ int parseAddress(char * address, netAddress_t * netaddress) {
   int bits, a, b, c, d;
   char *mask = strchr(address, '/');
 
-  mask[0] = '\0';
-  mask++;
-  bits = dotted2bits (mask);
+  if(mask == NULL)
+    bits= 32;
+  else {
+    mask[0] = '\0';
+    mask++;
+    bits = dotted2bits (mask);
+  }
 
   if(sscanf(address, "%d.%d.%d.%d", &a, &b, &c, &d) != 4)
     return -1;
@@ -2542,15 +2172,22 @@ char *sortNetworks(char *_addresses) {
   int num = 0, i, len = strlen(_addresses)+1;
   char  *strTokState = NULL, *address;
   struct net_sort nwsort[MAX_NUM_ENTRIES];
-    
+
   address = strtok_r(_addresses, ",", &strTokState);
 
-  while(address != NULL) {  
+  while(address != NULL) {
     if(num < MAX_NUM_ENTRIES) {
       char *mask = strchr(address, '/');
-      
+
       if(mask != NULL) {
 	nwsort[num].mask = atoi(&mask[1]);
+	nwsort[num++].network = address;
+      } else {
+	/*
+	  This looks like a mac address or an IP
+	  address without a /mask
+	*/
+	nwsort[num].mask = 32; /* / 32 */
 	nwsort[num++].network = address;
       }
     }
@@ -2598,22 +2235,23 @@ void parseInterfaceAddressLists(char* _addresses) {
   while(address != NULL) {
     char *mask;
     char *at = strchr(address, '@');
+    u_int a, b, c, d, e, f, ifIdx;
 
     /* traceEvent(TRACE_WARNING, "Parsing %s", address); */
 
     mask = strchr(address, '/');
 
-    if(mask == NULL) {
+    if((mask == NULL)
+       && (sscanf(address, "%d.%d.%d.%d@%d", &a, &b, &c, &d, &e) != 5) /* IP without /mask */) {
       /* Maybe this is a MAC address */
-      uint a, b, c, d, e, f, ifIdx;
 
-      if(sscanf(optarg, "%2X:%2X:%2X:%2X:%2X:%2X@%d", &a, &b, &c, &d, &e, &f, &ifIdx) != 7) {
+      if(sscanf(address, "%2X:%2X:%2X:%2X:%2X:%2X@%d", &a, &b, &c, &d, &e, &f, &ifIdx) != 7) {
 	traceEvent(TRACE_WARNING,
 		   "WARNING: Wrong MAC address/Interface specified (format AA:BB:CC:DD:EE:FF@4) "
 		   "with '-L': ignored");
       } else {
 	if(readWriteGlobals->num_src_mac_export >= NUM_MAC_INTERFACES) {
-	  traceEvent(TRACE_ERROR, "Too many '-L' specified. Ignored.");
+	  traceEvent(TRACE_ERROR, "Too many '-L' specified [max %u]. Ignored.", NUM_MAC_INTERFACES);
 	  break;
 	} else {
 	  readOnlyGlobals.mac_if_match[readWriteGlobals->num_src_mac_export].mac_address[0] = a,
@@ -2630,9 +2268,10 @@ void parseInterfaceAddressLists(char* _addresses) {
       netAddress_t netaddress;
 
       if(readOnlyGlobals.numInterfaceNetworks >= MAX_NUM_NETWORKS) {
-	traceEvent(TRACE_WARNING, "Too many networks defined (-L): skipping further networks");
+	traceEvent(TRACE_WARNING, "Too many networks defined (-L): skipping further networks [max %u]",
+		   MAX_NUM_NETWORKS);
 	break;
-      } 
+      }
 
       if(at == NULL) {
 	traceEvent(TRACE_WARNING, "Invalid format for network %s: ignored", address);
@@ -2642,7 +2281,7 @@ void parseInterfaceAddressLists(char* _addresses) {
 	  address = strtok_r(NULL, ",", &strTokState);
 	  continue;
 	}
-	
+
 	/* NOTE: entries are saved in network byte order for performance reasons */
 	readOnlyGlobals.interfaceNetworks[readOnlyGlobals.numInterfaceNetworks].network    = htonl(netaddress.network);
 	readOnlyGlobals.interfaceNetworks[readOnlyGlobals.numInterfaceNetworks].netmask    = htonl(netaddress.networkMask);
@@ -2684,7 +2323,7 @@ void parseBlacklistNetworks(char* _addresses) {
       netAddress_t netaddress;
 
       if(readOnlyGlobals.numBlacklistNetworks >= MAX_NUM_NETWORKS) {
-	traceEvent(TRACE_WARNING, "Too many networks defined (--black-list): skipping further networks");
+	traceEvent(TRACE_WARNING, "Too many networks defined (--black-list): skipping further networks [max %u]", MAX_NUM_NETWORKS);
 	break;
       }
 
@@ -2814,37 +2453,61 @@ char* etheraddr_string(const u_char *ep, char *buf) {
 
 /* ************************************ */
 
+void decrementLastPacket(FlowHashBucket *bkt, FlowDirection flow_direction, u_int len) {
+  if(flow_direction == src2dst_direction /* src -> dst */)
+    bkt->core.tuple.flowCounters.bytesSent -= len, bkt->core.tuple.flowCounters.pktSent -= 1;
+  else
+    bkt->core.tuple.flowCounters.bytesRcvd -= len, bkt->core.tuple.flowCounters.pktRcvd -= 1;
+}
+
+/* ************************************ */
+
 void resetBucketStats(FlowHashBucket* bkt,
 		      const struct pcap_pkthdr *h,
-		      uint len, FlowDirection direction,
+		      u_char *p,
+		      u_int len,  u_int ip_offset,
+		      FlowDirection direction,
 		      u_char *payload, int payloadLen) {
-  bkt->bucket_expired = 0; /* Not really necessary */
+  bkt->core.bucket_expired = 0; /* Not really necessary */
 
+  memset(&bkt->core.tuple.flowCounters, 0, sizeof(bkt->core.tuple.flowCounters));
 
-  memset(&bkt->flowCounters, 0, sizeof(bkt->flowCounters));
-  //memset(&bkt->flowTimers, 0, sizeof(bkt->flowTimers));
-  //memset(&bkt->clientNwDelay, 0, sizeof(bkt->clientNwDelay));
-  //memset(&bkt->serverNwDelay, 0, sizeof(bkt->serverNwDelay));
-  memset(&bkt->synTime, 0, sizeof(bkt->synTime));
-  memset(&bkt->synAckTime, 0, sizeof(bkt->synAckTime));
-  memset(&bkt->src2dstApplLatency, 0, sizeof(bkt->src2dstApplLatency));
-  memset(&bkt->dst2srcApplLatency, 0, sizeof(bkt->dst2srcApplLatency));
+  if(bkt->ext != NULL) {
+    //memset(&bkt->core.tuple.flowTimers, 0, sizeof(bkt->core.tuple.flowTimers));
+    if(bkt->ext->extensions != NULL) {
+      //memset(&bkt->ext->extensions->clientNwLatency, 0, sizeof(bkt->ext->extensions->clientNwLatency));
+      //memset(&bkt->ext->extensions->serverNwLatency, 0, sizeof(bkt->ext->extensions->serverNwLatency));
+      memset(&bkt->ext->extensions->synTime, 0, sizeof(bkt->ext->extensions->synTime));
+      memset(&bkt->ext->extensions->synAckTime, 0, sizeof(bkt->ext->extensions->synAckTime));
+      memset(&bkt->ext->extensions->src2dstApplLatency, 0, sizeof(bkt->ext->extensions->src2dstApplLatency));
+      memset(&bkt->ext->extensions->dst2srcApplLatency, 0, sizeof(bkt->ext->extensions->dst2srcApplLatency));
+    }
+  }
 
   if(direction == src2dst_direction /* src -> dst */) {
-    bkt->flowCounters.bytesSent = len, bkt->flowCounters.pktSent = 1, bkt->flowCounters.bytesRcvd = bkt->flowCounters.pktRcvd = 0;
-    memcpy(&bkt->flowTimers.firstSeenSent, &h->ts, sizeof(struct timeval));
-    memcpy(&bkt->flowTimers.lastSeenSent, &h->ts, sizeof(struct timeval));
+    bkt->core.tuple.flowCounters.bytesSent = len, bkt->core.tuple.flowCounters.pktSent = 1, bkt->core.tuple.flowCounters.bytesRcvd = bkt->core.tuple.flowCounters.pktRcvd = 0;
+    memcpy(&bkt->core.tuple.flowTimers.firstSeenSent, &h->ts, sizeof(struct timeval));
+    memcpy(&bkt->core.tuple.flowTimers.lastSeenSent, &h->ts, sizeof(struct timeval));
+    /* Reset the opposite direction */
+    memset(&bkt->core.tuple.flowTimers.firstSeenRcvd, 0, sizeof(struct timeval));
+    memset(&bkt->core.tuple.flowTimers.lastSeenRcvd, 0, sizeof(struct timeval));
   } else {
-    bkt->flowCounters.bytesSent = bkt->flowCounters.pktSent = 0, bkt->flowCounters.bytesRcvd = len, bkt->flowCounters.pktRcvd = 1;
-    memcpy(&bkt->flowTimers.firstSeenRcvd, &h->ts, sizeof(struct timeval));
-    memcpy(&bkt->flowTimers.lastSeenRcvd, &h->ts, sizeof(struct timeval));
+    bkt->core.tuple.flowCounters.bytesSent = bkt->core.tuple.flowCounters.pktSent = 0, bkt->core.tuple.flowCounters.bytesRcvd = len, bkt->core.tuple.flowCounters.pktRcvd = 1;
+    memcpy(&bkt->core.tuple.flowTimers.firstSeenRcvd, &h->ts, sizeof(struct timeval));
+    memcpy(&bkt->core.tuple.flowTimers.lastSeenRcvd, &h->ts, sizeof(struct timeval));
+    /* Reset the opposite direction */
+    memset(&bkt->core.tuple.flowTimers.firstSeenSent, 0, sizeof(struct timeval));
+    memset(&bkt->core.tuple.flowTimers.lastSeenSent, 0, sizeof(struct timeval));
   }
 
   /* NOTE: don't reset TOS as this is part of the flow key */
-  bkt->flags = 0;
-  if(bkt->src2dstPayload) { free(bkt->src2dstPayload);  bkt->src2dstPayload = NULL;  }
-  if(bkt->dst2srcPayload) { free(bkt->dst2srcPayload); bkt->dst2srcPayload = NULL; }
-  setPayload(bkt, h, payload, payloadLen, direction);
+  bkt->ext->flags = 0;
+
+  /* Don't reset the nDPI protocol as this is gonna be the same */
+  // bkt->core.l7.proto.ndpi_proto = NDPI_PROTOCOL_UNKNOWN;
+
+  if(payloadLen > 0)
+    setPayload(bkt, h, p, ip_offset, payload, payloadLen, direction);
 }
 
 /* ****************************************** */
@@ -2930,6 +2593,11 @@ void setCpuAffinity(char *dev_name, char *cpuId) {
   if(ret == 0) {
     traceEvent(TRACE_NORMAL, "CPU affinity successfully set to %s", _cpuId);
 
+    /*
+      Call instead on your system
+      ~/PF_RING/drivers/intel/ixgbe/ixgbe-3.1.15-FlowDirector-NoTNAPI/scripts/set_irq_affinity.sh ethX
+    */
+#if 0
     if((dev_name != NULL) && strcmp(dev_name, "none")) {
       struct stat stats;
 
@@ -2949,33 +2617,61 @@ void setCpuAffinity(char *dev_name, char *cpuId) {
     } else {
       traceEvent(TRACE_NORMAL, "Unspecified card (-i missing): not setting card affinity");
     }
+#endif
   } else
     traceEvent(TRACE_ERROR, "Unable to set CPU affinity to %08lx [ret: %d]",
 	       cpu_set, ret);
 }
+
+/* ******************************************* */
+
+void setThreadCpuAffinity(pthread_t t, char *cpuId) {
+#ifndef HAVE_PTHREAD_SET_AFFINITY
+  traceEvent(TRACE_WARNING, "This Linux distribution is too old and it does not support thread/core affinity");
+#else
+  int ret, num = 0;
+  cpu_set_t cpu_set;
+  int numCpus = sysconf(_SC_NPROCESSORS_CONF);
+  char *strtokState, *cpu, _cpuId[256] = { 0 };
+
+  if(cpuId == NULL)
+    return; /* No affinity */
+
+  traceEvent(TRACE_INFO, "This computer has %d processor(s)\n", numCpus);
+
+  CPU_ZERO(&cpu_set);
+
+  cpu = strtok_r(cpuId, ",", &strtokState);
+  while(cpu != NULL) {
+    int id = atoi(cpu);
+
+    if((id >= numCpus) || (id < 0)) {
+      traceEvent(TRACE_ERROR, "Skept CPU id %d as you have %d available CPU(s) [0..%d]", id, numCpus, numCpus-1);
+    } else {
+      CPU_SET(id, &cpu_set), num++;
+      traceEvent(TRACE_INFO, "Adding CPU %d to the CPU affinity set", id);
+      snprintf(&_cpuId[strlen(_cpuId)], sizeof(_cpuId)-strlen(_cpuId)-1, "%s%d", (_cpuId[0] != '\0') ? "," : "", id);
+    }
+
+    cpu = strtok_r(NULL, ",", &strtokState);
+  }
+
+  if(num == 0) {
+    traceEvent(TRACE_WARNING, "No valid CPU id has been selected: skipping CPU affinity set");
+    return;
+  }
+
+  ret = pthread_setaffinity_np(t, sizeof(cpu_set_t), &cpu_set);
+
+  if(ret == 0) {
+    traceEvent(TRACE_NORMAL, "CPU affinity successfully set to %s for thread %u", _cpuId, t);
+  } else
+    traceEvent(TRACE_ERROR, "Unable to set CPU affinity to %08lx for thread %u [ret: %d]",
+	       cpu_set, t, ret);
 #endif
-
-/* ******************************************* */
-
-u_int32_t queuedPkts(PacketQueue *queue) {
-  u_int32_t ret;
-
-  if(queue->num_queued_pkts >= queue->num_dequeued_pkts)
-    ret = (queue->num_queued_pkts-queue->num_dequeued_pkts);
-  else
-    ret = (((u_int32_t) - 1)-queue->num_dequeued_pkts+queue->num_queued_pkts)+1;
-
-  if(0) traceEvent(TRACE_NORMAL, "queuedPkts=%d", ret);
-
-  return(ret);
 }
 
-/* ******************************************* */
-
-u_int32_t numFreeSlots(PacketQueue *queue) {
-  u_int32_t ret = queue->queue_capacity - queuedPkts(queue);
-  return(ret);
-}
+#endif
 
 /* ******************************************* */
 
@@ -3020,21 +2716,43 @@ int mkdir_p(char *path) {
 void dropPrivileges(void) {
 #ifndef WIN32
   struct passwd *pw = NULL;
-  char *username;
 
   if(readOnlyGlobals.do_not_drop_privileges) return;
 
-  pw = getpwnam(username = "nobody");
-  if(pw == NULL) pw = getpwnam(username = "anonymous");
+#ifdef HAVE_NETFILTER
+  if(readOnlyGlobals.nf.fd >= 0) {
+    traceEvent(TRACE_WARNING, "Don't dropping privileges (required by NetFilter)");
+    return;
+  }
+#endif
+
+  if(getgid() && getuid()) {
+    traceEvent(TRACE_NORMAL, "Privileges are not dropped as we're not superuser");
+    return;
+  }
+
+  pw = getpwnam(readOnlyGlobals.unprivilegedUser);
+  /* if(pw == NULL) pw = getpwnam(username = "anonymous"); */
 
   if(pw != NULL) {
+    /* Change owner to pid file */
+    if(readOnlyGlobals.pidPath) {
+      int changeLogOwner = chown (readOnlyGlobals.pidPath, pw->pw_uid, pw->pw_gid);
+      if(changeLogOwner != 0)
+	traceEvent(TRACE_ERROR, "Unable to change owner to PID in file %s",
+		   readOnlyGlobals.pidPath);
+    }
+
     /* Drop privileges */
     if((setgid(pw->pw_gid) != 0) || (setuid(pw->pw_uid) != 0)) {
-      traceEvent(TRACE_WARNING, "Unable to drop privileges [%s]", strerror(errno));
+      traceEvent(TRACE_WARNING, "Unable to drop privileges [%s]",
+		 strerror(errno));
     } else
-      traceEvent(TRACE_NORMAL, "nProbe changed user to '%s'", username);
+      traceEvent(TRACE_NORMAL, "nProbe changed user to '%s'",
+		 readOnlyGlobals.unprivilegedUser);
   } else {
-    traceEvent(TRACE_WARNING, "Unable to locate user nobody");
+    traceEvent(TRACE_WARNING, "Unable to locate user %s",
+	       readOnlyGlobals.unprivilegedUser);
   }
 
   umask(0);
@@ -3051,18 +2769,16 @@ char* CollectorAddress2Str(CollectorAddress *collector, char *buf, u_int buf_len
   case TRANSPORT_UDP:     transport = "udp";     break;
   case TRANSPORT_TCP:     transport = "tcp";     break;
   case TRANSPORT_SCTP:    transport = "sctp";    break;
+#ifdef IP_HDRINCL
   case TRANSPORT_UDP_RAW: transport = "udp-raw"; break;
+#endif
   default:                transport = "???";
   }
 
-#ifdef IPV4_ONLY
-  inet_ntop(AF_INET, &collector->u.v4Address, addr, sizeof(addr)), port = collector->u.v4Address.sin_port;
-#else
   if(collector->isIPv6 == 0)
     inet_ntop(AF_INET, &collector->u.v4Address.sin_addr, addr, sizeof(addr)), port = collector->u.v4Address.sin_port;
   else
     inet_ntop(AF_INET6, &collector->u.v6Address.sin6_addr, addr, sizeof(addr)), port = collector->u.v6Address.sin6_port;
-#endif
 
   snprintf(buf, buf_len, "%s://%s:%d", transport, addr, ntohs(port));
   return(buf);
@@ -3071,12 +2787,12 @@ char* CollectorAddress2Str(CollectorAddress *collector, char *buf, u_int buf_len
 /* ******************************************* */
 
 static char* LogEventSeverity2Str(LogEventSeverity event_severity) {
- switch(event_severity) {
- case severity_error:   return("ERROR");
- case severity_warning: return("WARN");
- case severity_info:    return("INFO");
- default:               return("???");
- }
+  switch(event_severity) {
+  case severity_error:   return("ERROR");
+  case severity_warning: return("WARN");
+  case severity_info:    return("INFO");
+  default:               return("???");
+  }
 }
 
 /* ******************************************* */
@@ -3085,7 +2801,7 @@ static char* LogEventType2Str(LogEventType event_type) {
   switch(event_type) {
   case probe_started:              return("NPROBE_START");
   case probe_stopped:              return("NPROBE_STOP");
-  case packet_drop:                return("CAPTURE_PACKET_DROP");
+  case packet_drop:                return("CAPTURE_DROP");
   case flow_export_error:          return("FLOW_EXPORT_ERROR");
   case collector_connection_error: return("COLLECTOR_CONNECTION_ERROR");
   case collector_connected:        return("CONNECTED_TO_COLLECTOR");
@@ -3120,7 +2836,7 @@ void dumpLogEvent(LogEventType event_type, LogEventSeverity severity, char *mess
   theTime = time(NULL);
   strftime(theDate, sizeof(theDate), "%d/%b/%Y %H:%M:%S", localtime(&theTime));
 
-  fprintf(fd, "%s\t%s\t%s\t%s\n", theDate,
+  fprintf(fd, "%s\t%s\t%s\t\t%s\n", theDate,
 	  LogEventSeverity2Str(severity),
 	  LogEventType2Str(event_type), message ? message : "");
   fclose(fd);
@@ -3128,7 +2844,818 @@ void dumpLogEvent(LogEventType event_type, LogEventSeverity severity, char *mess
 
 /* ****************************************************** */
 
-u_int32_t to_msec(struct timeval *tv) {
-  return(tv->tv_sec * 1000 + tv->tv_usec/1000);
+u_int64_t to_msec(struct timeval *tv) {
+  u_int64_t val = (u_int64_t)tv->tv_sec * 1000;
+
+  val += (u_int64_t)tv->tv_usec/1000;
+
+  return(val);
 }
 
+/* ****************************************************** */
+
+struct timeval* min_nonzero_timeval(struct timeval *a, struct timeval *b) {
+  if((a->tv_sec == 0) && (a->tv_usec == 0))
+    return(b);
+  else if((b->tv_sec == 0) && (b->tv_usec == 0))
+    return(a);
+  else if(a->tv_sec < b->tv_sec)
+    return(a);
+  else if(a->tv_sec > b->tv_sec)
+    return(b);
+  else {
+    if(a->tv_usec < b->tv_usec)
+      return(a);
+    else
+      return(b);
+  }
+}
+
+/* ****************************************************** */
+
+struct timeval* max_timeval(struct timeval *a, struct timeval *b) {
+  if((a->tv_sec == 0) && (a->tv_usec == 0))
+    return(b);
+  else if((b->tv_sec == 0) && (b->tv_usec == 0))
+    return(a);
+  else if(a->tv_sec < b->tv_sec)
+    return(b);
+  else if(a->tv_sec > b->tv_sec)
+    return(a);
+  else {
+    if(a->tv_usec < b->tv_usec)
+      return(b);
+    else
+      return(a);
+  }
+}
+
+/* ****************************************************** */
+
+/* Remove tabs */
+char* detab(char *str) {
+  int i;
+
+  if(str == NULL) return("");
+
+  for(i=0; str[i] != '\0'; i++) {
+    switch(str[i]) {
+    case '\t':
+    case '\r':
+      str[i] = ' ';
+      break;
+    }
+  }
+
+  return(str);
+}
+
+/* ****************************************************** */
+
+void setThreadAffinity(u_int core_id) {
+#ifdef HAVE_PTHREAD_SET_AFFINITY
+  if((getNumCores() > 1) && (readOnlyGlobals.numProcessThreads > 1)) {
+    /* Bind this thread to a specific core */
+    int rc;
+#ifdef __NetBSD__
+    cpuset_t *cset;
+    cpuid_t ci;
+
+    cset = cpuset_create();
+    if (cset == NULL) {
+      err(EXIT_FAILURE, "cpuset_create");
+    }
+
+    ci = core_id;
+    cpuset_set(ci, cset);
+    rc = pthread_setaffinity_np(pthread_self(), cpuset_size(cset), cset);
+#else
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+
+    rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t),  &cpuset);
+#endif
+
+    if(rc != 0) {
+      traceEvent(TRACE_ERROR, "Error while binding to core %ld: errno=%i\n",
+		 core_id, rc);
+    } else {
+      traceEvent(TRACE_INFO, "Bound thread to core %lu/%u\n", core_id, getNumCores());
+    }
+  }
+#endif
+}
+
+/* ****************************************************** */
+
+float timeval2ms(struct timeval *tv) {
+  return((float)tv->tv_sec*1000+(float)tv->tv_usec/1000);
+}
+
+/* ****************************************************** */
+
+u_short getNumCores(void) {
+#ifdef linux
+  return(sysconf(_SC_NPROCESSORS_CONF));
+#else
+  return(ACT_NUM_PCAP_THREADS);
+#endif
+}
+
+/* ************************************ */
+
+char *getProtoName(u_short protoId) {
+  if(readOnlyGlobals.l7.l7handler == NULL)
+    initL7Discovery();
+
+  return(ndpi_get_proto_name(readOnlyGlobals.l7.l7handler, protoId));
+}
+
+/* ************************************ */
+
+#ifdef HAVE_PF_RING
+int forwardPacket(int rx_device_id, char *p, int p_len) {
+  pfring *out_dev, *in_dev;
+  int rc;
+
+  if(readWriteGlobals->out_devices[0].deviceId == rx_device_id)
+    out_dev = readWriteGlobals->out_devices[1].ring, in_dev = readWriteGlobals->out_devices[0].ring;
+  else
+    out_dev = readWriteGlobals->out_devices[0].ring, in_dev = readWriteGlobals->out_devices[1].ring;
+
+  if(out_dev != NULL)
+    rc = pfring_send(out_dev, (char*)p, p_len, 1 /* flush_packet */);
+  else
+    rc = 0;
+
+  if(rc < 0) {
+    static u_int8_t warn_sent = 0;
+
+    traceEvent(TRACE_NORMAL, "[PF_RING] pfring_send(%s,len=%d) returned %d",
+	       out_dev->device_name, p_len, rc);
+
+
+    if(!warn_sent) {
+      traceEvent(TRACE_NORMAL, "[PF_RING] Please make sure that LRO/GRO is disabled on your NICs (ethtool -k <NIC>)");
+      warn_sent = 1;
+    }
+  }
+
+#if 0
+  traceEvent(TRACE_NORMAL, "[PF_RING] Forwarded packet %s -> %s [len=%d]",
+	     in_dev->device_name, out_dev->device_name, p_len);
+#endif
+
+  return(rc);
+}
+#endif
+
+/* *********************************************** */
+
+void freeVarLenStr(varlen_string *str) {
+  int i;
+
+  for(i=0; i<readOnlyGlobals.max_packet_ordering_queue; i++) {
+    if(str->partial[i].str) {
+      traceEvent(TRACE_WARNING, "Non empty varlen string '%s'", str->partial[i].str);
+      free(str->partial[i].str);
+    } else
+      break;
+  }
+
+  if(str->str_len > 0) {
+    if(str->str) free(str->str);
+    str->str = NULL, str->str_len = 0;
+  }
+}
+
+/* *********************************************** */
+
+void appendRawString(varlen_string *str, u_int32_t seq_id,
+		     char *to_add, u_int to_add_len, u_int8_t zap_chars) {
+  int add_comma = 0, i, new_len;
+  const u_int max_avail_size = MAX_VARLEN_STR_LEN;
+  char *new_str;
+  u_int8_t free_mem = 0;
+
+#if 0
+  if(unlikely(readOnlyGlobals.enable_debug)) {
+    if(seq_id > 0)
+      traceEvent(TRACE_NORMAL, "appendRawString(seq_id=%u)", seq_id);
+
+    traceEvent(TRACE_NORMAL, "BEFORE %s(str_len: %d, to_add_len: %d)", __FUNCTION__,
+	       str->str_len, to_add_len);
+  }
+#endif
+
+  if(unlikely((str == NULL) || (to_add_len == 0) || isStringFull(str)))
+    return;
+
+  if(seq_id > 0) {
+    u_int32_t i, low_idx, low_seq = (u_int32_t)-1;
+
+    for(i=0; i<readOnlyGlobals.max_packet_ordering_queue; i++) {
+      if(str->partial[i].seq_id == 0) {
+	str->partial[i].str = (char*)malloc(to_add_len+1);
+	if(unlikely(str->partial[i].str == NULL)) {
+	  traceEvent(TRACE_WARNING, "Not enough memory!");
+	  return;
+	}
+
+	strncpy(str->partial[i].str, to_add, to_add_len);
+	str->partial[i].seq_id = seq_id, str->partial[i].str_len = to_add_len;
+
+	return;
+      } else if(str->partial[i].seq_id == seq_id) {
+	/* Duplicated packet */
+
+	/* We prefer to keep longer packets */
+	if(to_add_len > str->partial[i].str_len) {
+	  char *duplicated = (char*)malloc(to_add_len+1);
+	  if(unlikely(duplicated == NULL)) {
+	    traceEvent(TRACE_WARNING, "Not enough memory!");
+	    return;
+	  }
+
+	  free(str->partial[i].str);
+	  str->partial[i].str = duplicated;
+
+	  strncpy(str->partial[i].str, to_add, to_add_len);
+	  str->partial[i].str_len = to_add_len;
+	}
+
+	return;
+      } else {
+	if(str->partial[i].seq_id < low_seq)
+	  low_seq = str->partial[i].seq_id, low_idx = i;
+      }
+    } /* for */
+
+    if(seq_id > low_seq) {
+      /* We swap the values */
+      char *tmp_str = str->partial[low_idx].str;
+      u_int32_t tmp_str_len = str->partial[low_idx].str_len;
+
+      str->partial[low_idx].str = (char*)malloc(to_add_len+1);
+      if(unlikely(str->partial[low_idx].str == NULL)) {
+	traceEvent(TRACE_WARNING, "Not enough memory!");
+	return;
+      }
+
+      strncpy(str->partial[low_idx].str, to_add, to_add_len);
+      str->partial[low_idx].seq_id = seq_id, str->partial[low_idx].str_len = to_add_len;
+
+      /* to_add now contains the lowest index */
+      to_add = tmp_str, to_add_len = tmp_str_len, free_mem = 1;
+    }
+  }
+
+  if(zap_chars && (str->str_len > 0)) add_comma = 1;
+
+  new_len = str->str_len + to_add_len + add_comma;
+  if(new_len > max_avail_size) {
+    new_len = max_avail_size;
+    to_add_len = max_avail_size - (str->str_len + add_comma);
+  }
+
+  if(str->str_len == 0)
+    new_str = (char*)malloc(new_len+1);
+  else
+    new_str = (char*)realloc(str->str, new_len+1);
+
+  if(unlikely(new_str == NULL)) {
+    traceEvent(TRACE_WARNING, "Not enough memory!");
+    if(free_mem) free(to_add);
+    return;
+  }
+
+  str->str = new_str;
+
+  if(add_comma) {
+    /* We enter this branch only if the string was not empty */
+    str->str[str->str_len]= ',';
+    str->str_len++;
+  }
+
+  if(zap_chars) {
+    /* Remove unwanted chars */
+    for(i=0; i<to_add_len; i++) {
+      if (unlikely(to_add[i] == '\r' || to_add[i] == '\n' || to_add[i] == '\t')) {
+	to_add[i] = ' ';
+	break;
+      }
+    }
+  }
+
+  strncpy(&str->str[str->str_len], to_add, to_add_len);
+  str->str_len = new_len;
+  str->str[str->str_len] = '\0';
+
+#if 0
+  if(unlikely(readOnlyGlobals.enable_debug))
+    traceEvent(TRACE_NORMAL, "AFTER %s(str_len: %d, to_add_len: %d)", __FUNCTION__,
+	       str->str_len, to_add_len);
+#endif
+
+  if(free_mem) free(to_add);
+}
+
+/* *********************************************** */
+
+void flushVarlenString(varlen_string *str) {
+  int i, low_idx = -1;
+  u_int32_t low_seq = (u_int32_t)-1;
+
+  for(i=0; i<readOnlyGlobals.max_packet_ordering_queue; i++) {
+    if((str->partial[i].seq_id > 0) && (str->partial[i].seq_id < low_seq))
+      low_seq = str->partial[i].seq_id, low_idx = i;
+  }
+
+  if(low_idx >= 0) {
+    appendRawString(str, 0, str->partial[low_idx].str,  str->partial[low_idx].str_len, 0);
+    free(str->partial[low_idx].str);
+    str->partial[low_idx].seq_id = 0, str->partial[low_idx].str = NULL;
+    flushVarlenString(str); /* Redo */
+  }
+}
+
+/* *********************************************** */
+
+char* varlen2str(varlen_string *str) {
+  if(str && (str->str_len > 0))
+    return(str->str);
+  else
+    return("");
+}
+
+/* *********************************************** */
+
+int isStringFull(varlen_string *str) {
+  return(((str->str_len+1) >= MAX_VARLEN_STR_LEN) ? 1 : 0);
+}
+
+/* *********************************************** */
+
+int isStringEmpty(varlen_string *str) {
+  flushVarlenString(str);
+  return((str->str_len == 0) ? 1 : 0);
+}
+
+/* *********************************************** */
+
+void appendString(varlen_string *str, u_int32_t seq_id,
+		  char *to_add, u_int to_add_len,
+		  u_int8_t zap_chars,
+		  u_int8_t zap_trailing_carriage_return) {
+  /* Header */
+  while((to_add[0] != '\0') &&
+        (to_add_len > 1) &&
+	((to_add[0] == ' ' ) ||
+	 (to_add[0] == '\t') ||
+	 (to_add[0] == '\r') ||
+	 (to_add[0] == '\n'))) {
+    to_add++, to_add_len--;
+  }
+
+  /* Trailer */
+  while((to_add_len > 1) &&
+        ((to_add[to_add_len-1] == ' ' ) ||
+	 (to_add[to_add_len-1] == '\t') ||
+	 (zap_trailing_carriage_return &&
+	  ((to_add[to_add_len-1] == '\r') ||
+	   (to_add[to_add_len-1] == '\n'))))) {
+    to_add_len--;
+  }
+
+#if 0
+  if((to_add[0] == '<') && (to_add[to_add_len-1] == '>')) {
+    to_add++, to_add_len -= 2;
+  }
+#endif
+
+  /* Avoid duplicates */
+  if(unlikely(str->str && strstr(str->str, to_add)))
+    return;
+  else
+    appendRawString(str, seq_id, to_add, to_add_len, zap_chars);
+}
+
+/* *********************************************** */
+
+void removeDoubleSpaces(char *str) {
+  int last_added, next_to_add, len = strlen(str);
+
+  // traceEvent(TRACE_NORMAL, "BEFORE %s(%s)", __FUNCTION__, str);
+
+  for(last_added=0, next_to_add=1; next_to_add<len; next_to_add++) {
+    if(str[next_to_add] == '\t') str[next_to_add] = ' ';
+
+    if((str[next_to_add] == ' ')
+       && (str[last_added] == str[next_to_add])) {
+      ;
+    } else {
+      str[++last_added] = str[next_to_add];
+    }
+  }
+
+  str[++last_added] = '\0';
+
+  // traceEvent(TRACE_NORMAL, "AFTER %s(%s)", __FUNCTION__, str);
+}
+
+/* *********************************************** */
+
+void freeRfc822Info(struct rfc822_info *info) {
+  freeVarLenStr(&info->email_header);
+  freeVarLenStr(&info->from);
+  freeVarLenStr(&info->to);
+  freeVarLenStr(&info->cc);
+  freeVarLenStr(&info->subject);
+  freeVarLenStr(&info->message_id);
+
+  memset(info, 0, sizeof(struct rfc822_info));
+}
+
+/* *********************************************** */
+
+static void processEmailHeaderElement(struct rfc822_info *info,
+				      char *token, varlen_string *element) {
+  char *str, *to_search = info->email_header.str;
+
+  while((str = strcasestr(to_search, token)) != NULL) {
+    /* We need to check if the element is at the beginning of the row */
+    if(str != info->email_header.str) /* Not the first element of the string */
+      if(str[-1] != '\n') {
+	to_search = &str[strlen(token)];
+	continue;
+      }
+
+    break;
+  }
+
+  if(str != NULL) {
+    int i, offset = strlen(token);
+
+    i = offset;
+
+    while(1) {
+      if((str[i] == '\r')
+	 || (str[i] == '\n')
+	 || (str[i] == '\0')) {
+	break;
+      } else
+	i++;
+    }
+
+    appendString(element, 0 /* seq_id */, &str[offset], i-offset+1, 1 /* zap chars */, 1 /* zap trailing carriage return */);
+  }
+}
+
+/* *********************************************** */
+
+void processEmailHeader(struct rfc822_info *info) {
+  char *str;
+
+  flushVarlenString(&info->email_header);
+
+  if(info->email_header.str == NULL) return;
+
+#if 0
+  if(unlikely(readOnlyGlobals.enable_debug))
+    traceEvent(TRACE_NORMAL, "%s(%s)", __FUNCTION__, info->email_header.str);
+#endif
+
+  str = strstr(info->email_header.str, "\r\n\r\n");
+  if(str)
+    str[0] = '\0'; /* We stop after the email header */
+
+  /* Replace '\r\n ' with '   ' to merge splitted lines together */
+  while((str = strstr(info->email_header.str, "\r\n\t")) != NULL)
+    str[0] = ' ', str[1] = ' ';
+
+  while((str = strstr(info->email_header.str, "\r\n ")) != NULL)
+    str[0] = ' ', str[1] = ' ';
+
+  removeDoubleSpaces(info->email_header.str);
+
+  if(info->from.str_len == 0) {
+    /* printf("%s\n", info->email_header.str); */
+    processEmailHeaderElement(info, "From:", &info->from);
+    processEmailHeaderElement(info, "To:", &info->to);
+    processEmailHeaderElement(info, "Cc:", &info->cc);
+    processEmailHeaderElement(info, "Subject:", &info->subject);
+    processEmailHeaderElement(info, "Message-ID:", &info->message_id);
+    processEmailHeaderElement(info, "Reply-To:", &info->reply_to);
+  }
+}
+
+/* *********************************************** */
+
+void dumpRfc822Info(struct rfc822_info *info) {
+  if(info->from.str)
+    traceEvent(TRACE_NORMAL, "[FROM]       %s", info->from.str);
+
+  if(info->to.str)
+    traceEvent(TRACE_NORMAL, "[TO]         %s", info->to.str);
+
+  if(info->cc.str)
+    traceEvent(TRACE_NORMAL, "[CC]         %s", info->cc.str);
+
+  if(info->subject.str)
+    traceEvent(TRACE_NORMAL, "[SUBJECT]    %s", info->subject.str);
+
+  if(info->message_id.str)
+    traceEvent(TRACE_NORMAL, "[MESSAGE-ID] %s", info->message_id.str);
+}
+
+/* *********************************************** */
+
+void initQueue(ItemsQueue *q) {
+  memset(q, 0, sizeof(ItemsQueue));
+  createCondvar(&q->dequeue_condvar);
+}
+
+/* *********************************************** */
+
+void deleteQueue(ItemsQueue *q) {
+  deleteCondvar(&q->dequeue_condvar);
+}
+
+/* *********************************************** */
+
+void initAtomic(atomic_u_int32_t *a) {
+  a->value = 0;
+#ifndef HAVE_BUILTIN_ATOMIC
+  pthread_rwlock_init(&a->lock, NULL);
+#endif
+}
+
+/* *********************************************** */
+
+u_int32_t incAtomic(atomic_u_int32_t *a, u_int32_t value) {
+#ifndef HAVE_BUILTIN_ATOMIC
+#ifdef WIN32
+  if(a->lock == NULL) { traceEvent(TRACE_ERROR, "Internal error: not initialized atomic"); return(0); }
+#endif
+  pthread_rwlock_wrlock(&a->lock);
+  a->value += value;
+  pthread_rwlock_unlock(&a->lock);
+  return(a->value);
+#else
+  return((u_int32_t)__sync_add_and_fetch(&a->value, value));
+#endif
+}
+
+/* *********************************************** */
+
+u_int32_t decAtomic(atomic_u_int32_t *a, u_int32_t value) {
+#ifndef HAVE_BUILTIN_ATOMIC
+#ifdef WIN32
+  if(a->lock == NULL) { traceEvent(TRACE_ERROR, "Internal error: not initialized atomic"); return(0); }
+#endif
+  pthread_rwlock_wrlock(&a->lock);
+  a->value -= value;
+  pthread_rwlock_unlock(&a->lock);
+  return(a->value);
+#else
+  return((u_int32_t)__sync_sub_and_fetch(&a->value, value));
+#endif
+}
+
+/* *********************************************** */
+
+u_int32_t getAtomic(atomic_u_int32_t *a) {
+  return(a->value);
+}
+
+/* *********************************************** */
+
+int execute_command(char *command_path, char *path) {
+  int rc = 0;
+
+  if(path && command_path
+     && (path[0] != 0) && (command_path[0] != 0)) {
+    char command_buf[1024];
+
+    snprintf(command_buf, sizeof(command_buf), "%s %s &", command_path, path);
+    traceEvent(TRACE_INFO, "Executing '%s'", command_buf);
+    rc = system(command_buf);
+
+    if(rc == -1)
+      traceEvent(TRACE_WARNING, "Unable to execute '%s'", command_buf);
+  } else
+    rc = -2;
+
+  return(rc);
+}
+
+/* *********************************************** */
+
+void dump_bad_packet(const struct pcap_pkthdr *h, const u_char *p) {
+  if(readOnlyGlobals.dumpBadPacketsPcap != NULL) {
+    pthread_rwlock_wrlock(&readWriteGlobals->dumpFileLock);
+    pcap_dump((u_char*)readOnlyGlobals.dumpBadPacketsPcap, h, p);
+    pcap_dump_flush(readOnlyGlobals.dumpBadPacketsPcap); /* Flush data immediately */
+    pthread_rwlock_unlock(&readWriteGlobals->dumpFileLock);
+  }
+}
+
+/* *********************************************** */
+
+int bindthread2core(pthread_t thread_id, int core_id) {
+#ifdef HAVE_PTHREAD_SET_AFFINITY
+  cpu_set_t cpuset;
+  int s;
+
+  CPU_ZERO(&cpuset);
+  CPU_SET(core_id, &cpuset);
+  if((s = pthread_setaffinity_np(thread_id, sizeof(cpu_set_t), &cpuset)) != 0) {
+    traceEvent(TRACE_WARNING, "Error while binding to core %u: errno=%i\n", core_id, s);
+    return(-1);
+  } else {
+    return(0);
+  }
+#else
+  traceEvent(TRACE_WARNING, "Your system lacks of pthread_setaffinity_np() (not core binding)\n");
+  return(0);
+#endif
+}
+
+/* *********************************************** */
+
+int formatTimestamp(struct timeval *tv, char *buf, u_int buf_len) {
+  time_t t;
+  struct tm tmp;
+  int rc;
+
+  switch(readOnlyGlobals.ts_format) {
+  case human_readable_ts_format:
+    /* yy-mm-dd hh:mm:ss */
+    t = (unsigned int)tv->tv_sec + readOnlyGlobals.local_timezone;
+
+    gmtime_r(&t, &tmp);
+    rc = strftime(buf, buf_len, "%F %T", &tmp);
+
+    if(rc < buf_len)
+      rc += snprintf(&buf[rc], buf_len-rc, ".%06u",(unsigned int)tv->tv_usec);
+    break;
+  case epoch_with_usec_ts_format:
+    rc = snprintf(buf, buf_len, "%u.%06u", (unsigned int)tv->tv_sec, (unsigned int)tv->tv_usec);
+    break;
+  default:
+    rc = snprintf(buf, buf_len, "%u", (unsigned int)tv->tv_sec);
+    break;
+  }
+
+  return(rc);
+}
+
+/* *********************************************** */
+
+char* formatFileTimestamp(time_t epoch, char *buf, u_int buf_len) {
+#if 0
+  time_t t;
+  struct tm tmp;
+
+  switch(readOnlyGlobals.ts_format) {
+  case human_readable_ts_format:
+    /* yy-mm-dd hh:mm:ss */
+    t = (unsigned int)epoch;
+
+    localtime_r(&t, &tmp);
+    strftime(buf, buf_len, "%F_%T", &tmp);
+    break;
+  case epoch_with_usec_ts_format:
+  default:
+    snprintf(buf, buf_len, "%u", (unsigned int)epoch);
+    break;
+  }
+#else
+  snprintf(buf, buf_len, "%u", (unsigned int)epoch);
+#endif
+
+  return(buf);
+}
+
+/* ****************************************************** */
+
+char* format_tv(struct timeval *a, char *buf, u_int buf_len) {
+  formatTimestamp(a, buf, buf_len);
+  return(buf);
+}
+
+/* ****************************************************** */
+
+/*
+  It transforms
+
+  xxx <a@b>, yyy <c@d>, zzz <e@f>
+
+  into
+
+  xxx <a@b>,yyy <c@d>,zzz <e@f>
+*/
+char* compactEmailList(char *l) {
+  int i = 0, j = 0, len = strlen(l)-1;
+
+  if(len > 0) {
+    for(i=0; i<len; i++) {
+      l[j++] = l[i];
+
+      if((l[i] == ',') && (l[i+1] == ' '))
+	i++;
+    }
+
+    l[j++] = l[len];
+    l[j++] = '\0';
+  }
+
+  return(l);
+}
+
+/* ****************************************************** */
+
+char* flowDirection2char(FlowDirection direction) {
+  switch(direction) {
+  case unknown_direction: return("U"); /* Unknown */
+  case src2dst_direction: return("C"); /* Client  */
+  case dst2src_direction: return("S"); /* Server  */
+  }
+}
+
+/* ****************************************************** */
+
+#ifdef HAVE_ZMQ
+
+int initZMQ() {
+  if(readOnlyGlobals.zmq.endpoint != NULL) {
+    readOnlyGlobals.zmq.context = zmq_ctx_new();
+
+    if(readOnlyGlobals.zmq.context == NULL) {
+      traceEvent(TRACE_ERROR, "Unable to initialize ZMQ %s (context)", readOnlyGlobals.zmq.endpoint);
+      return(-1);
+    }
+
+    readOnlyGlobals.zmq.publisher = zmq_socket(readOnlyGlobals.zmq.context, ZMQ_PUB);
+
+    if(readOnlyGlobals.zmq.publisher == NULL) {
+      traceEvent(TRACE_ERROR, "Unable to initialize ZMQ %s (publisher)", readOnlyGlobals.zmq.endpoint);
+      return(-2);
+    }
+
+    if(readOnlyGlobals.zmq.endpoint != NULL) {
+      char *endpoint = strdup(readOnlyGlobals.zmq.endpoint);
+      char *ep = strtok(endpoint, ",");
+
+      while(ep != NULL) {
+	if(zmq_bind(readOnlyGlobals.zmq.publisher, ep) != 0)
+	  traceEvent(TRACE_ERROR, "Unable to bind ZMQ endpoint %s: %s", ep, strerror(errno));
+	else
+	  traceEvent(TRACE_NORMAL, "Succesfully created ZMQ endpoint %s", ep);
+
+	ep = strtok(NULL, ",");
+      }
+
+      free(endpoint);
+    }
+  }
+
+  return(0);
+}
+
+/* ****************************************************** */
+
+void sendZMQ(char *str, u_int8_t is_event) {
+  if(readOnlyGlobals.zmq.publisher) {
+    struct zmq_msg_hdr msg_hdr;
+
+    snprintf(msg_hdr.url, sizeof(msg_hdr.url), "%s", is_event ? "event" : "flow");
+    msg_hdr.version = 0;
+    msg_hdr.size = strlen(str);
+
+    zmq_send(readOnlyGlobals.zmq.publisher, &msg_hdr, sizeof(msg_hdr), ZMQ_SNDMORE);
+    zmq_send(readOnlyGlobals.zmq.publisher, str, msg_hdr.size, 0);
+    traceEvent(TRACE_INFO, "[ZMQ] %s", str);
+  }
+}
+#endif
+
+/* ****************************************************** */
+
+char* escapeQuotes(char *in, char *out, u_int out_len) {
+  int i, j=0, m = out_len-2;
+
+  out[j++] = '"';
+
+  for(i=0; (in[i] != '\0') && (j < m); i++) {
+    if(in[i] == '"') out[j++] = '\\';
+
+    out[j++] = in[i];
+  }
+
+  out[j++] = '"';
+  out[j++] = '\0';
+
+  return(out);
+}

@@ -1,7 +1,7 @@
 /*
  *        nProbe - a Netflow v5/v9/IPFIX probe for IPv4/v6
  *
- *       Copyright (C) 2002-11 Luca Deri <deri@ntop.org>
+ *       Copyright (C) 2002-14 Luca Deri <deri@ntop.org>
  *
  *                     http://www.ntop.org/
  *
@@ -22,64 +22,101 @@
 
 #include "nprobe.h"
 
+#ifdef HAVE_VOIP_EXTENSIONS
+#include "plugins/hep.c"
+#endif
+
 #ifdef WIN32
 #define MSG_DONTWAIT 0
 #endif
 
 /* ****************************************************** */
 
+static void checkDumpExport(FlowHashBucket *myBucket,
+			    FlowDirection direction) {
+  if(readOnlyGlobals.enableHttpPlugin
+     || readOnlyGlobals.enableProcessPlugin
+     || readOnlyGlobals.enableDnsPlugin
+     || readOnlyGlobals.enableMySQLPlugin
+     || readOnlyGlobals.enableSipPlugin
+     || readOnlyGlobals.enableOraclePlugin
+     || readOnlyGlobals.enableWhoisPlugin
+     || readOnlyGlobals.enableGtpPlugin
+     || readOnlyGlobals.enableRadiusPlugin
+     || readOnlyGlobals.enableDiameterPlugin
+     || readOnlyGlobals.enableSmtpPlugin
+     || readOnlyGlobals.enableImapPlugin
+     || readOnlyGlobals.enablePopPlugin
+     || readOnlyGlobals.enableL7BridgePlugin
+     ) {
+    /* Dummy: used to dump flows on disk */
+    checkPluginExport(NULL, direction, myBucket, NULL, NULL, NULL);
+  }
+}
+
+/* ****************************************************** */
+
 static int exportBucketToNetflowV5(FlowHashBucket *myBucket,
-				   FlowDirection direction,
-				   u_char free_memory /* Ignored */) {
+				   FlowDirection direction) {
 
   if(direction == src2dst_direction /* src -> dst */) {
-    if(myBucket->flowCounters.pktSent == 0) return(0); /* Nothing to export */
+    if(myBucket->core.tuple.flowCounters.pktSent == 0) return(0); /* Nothing to export */
 
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].input     = htons(myBucket->if_input);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].output    = htons(myBucket->if_output);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].srcaddr   = htonl(myBucket->src->host.ipType.ipv4);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dstaddr   = htonl(myBucket->dst->host.ipType.ipv4);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dPkts     = htonl(myBucket->flowCounters.pktSent);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dOctets   = htonl(myBucket->flowCounters.bytesSent);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].first     = htonl(msTimeDiff(&myBucket->flowTimers.firstSeenSent,
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].input     = htons(ifIdx(myBucket, 1));
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].output    = htons(ifIdx(myBucket, 0));
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].srcaddr   = htonl(myBucket->core.tuple.key.k.ipKey.src.ipType.ipv4);
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dstaddr   = htonl(myBucket->core.tuple.key.k.ipKey.dst.ipType.ipv4);
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].nexthop   = (myBucket->ext && (myBucket->ext->nextHop.ipVersion == 4)) ? htonl(myBucket->ext->nextHop.ipType.ipv4) : 0;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dPkts     = htonl(myBucket->core.tuple.flowCounters.pktSent);
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dOctets   = htonl(myBucket->core.tuple.flowCounters.bytesSent);
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].first     = htonl(msTimeDiff(&myBucket->core.tuple.flowTimers.firstSeenSent,
 												    &readOnlyGlobals.initialSniffTime));
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].last      = htonl(msTimeDiff(&myBucket->flowTimers.lastSeenSent,
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].last      = htonl(msTimeDiff(&myBucket->core.tuple.flowTimers.lastSeenSent,
 												    &readOnlyGlobals.initialSniffTime));
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].srcport   = htons(myBucket->sport);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dstport   = htons(myBucket->dport);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].tos       = myBucket->src2dstTos;
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].src_as    = htons(getAS(myBucket, 1));
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dst_as    = htons(getAS(myBucket, 0));
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].src_mask  = (myBucket->src_mask != 0) ? myBucket->src_mask : ip2mask(myBucket->src->host);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dst_mask  = (myBucket->dst_mask != 0) ? myBucket->dst_mask : ip2mask(myBucket->dst->host);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].tcp_flags = (u_int8_t)myBucket->src2dstTcpFlags;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].srcport   = htons(myBucket->core.tuple.key.k.ipKey.sport);
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dstport   = htons(myBucket->core.tuple.key.k.ipKey.dport);
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].tos       = myBucket->ext ? myBucket->ext->src2dstTos : 0;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].src_as    = myBucket->ext ? htons(getAS(&myBucket->core.tuple.key.k.ipKey.src, &myBucket->ext->srcInfo)) : 0;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dst_as    = myBucket->ext ? htons(getAS(&myBucket->core.tuple.key.k.ipKey.dst, &myBucket->ext->dstInfo)) : 0;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].src_mask  = myBucket->ext ? ip2mask(&myBucket->core.tuple.key.k.ipKey.src, &myBucket->ext->srcInfo) : 0;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dst_mask  = myBucket->ext ? ip2mask(&myBucket->core.tuple.key.k.ipKey.dst, &myBucket->ext->dstInfo) : 0;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].tcp_flags = myBucket->ext ? (u_int8_t)myBucket->ext->protoCounters.tcp.src2dstTcpFlags : 0;
+
+    readWriteGlobals->flowExportStats.totExportedFlowBytes += myBucket->core.tuple.flowCounters.bytesSent;
+    readWriteGlobals->flowExportStats.totExportedFlowPkts  += myBucket->core.tuple.flowCounters.pktSent;
   } else {
-    if(myBucket->flowCounters.pktRcvd == 0) return(0); /* Nothing to export */
+    if(myBucket->core.tuple.flowCounters.pktRcvd == 0) return(0); /* Nothing to export */
 
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].input     = htons(myBucket->if_output);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].output    = htons(myBucket->if_input);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].srcaddr   = htonl(myBucket->dst->host.ipType.ipv4);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dstaddr   = htonl(myBucket->src->host.ipType.ipv4);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dPkts     = htonl(myBucket->flowCounters.pktRcvd);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dOctets   = htonl(myBucket->flowCounters.bytesRcvd);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].first     = htonl(msTimeDiff(&myBucket->flowTimers.firstSeenRcvd,
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].input     = htons(ifIdx(myBucket, 0));
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].output    = htons(ifIdx(myBucket, 1));
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].srcaddr   = htonl(myBucket->core.tuple.key.k.ipKey.dst.ipType.ipv4);
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dstaddr   = htonl(myBucket->core.tuple.key.k.ipKey.src.ipType.ipv4);
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].nexthop   = (myBucket->ext && (myBucket->ext->nextHop.ipVersion == 4)) ? htonl(myBucket->ext->nextHop.ipType.ipv4) : 0;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dPkts     = htonl(myBucket->core.tuple.flowCounters.pktRcvd);
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dOctets   = htonl(myBucket->core.tuple.flowCounters.bytesRcvd);
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].first     = htonl(msTimeDiff(&myBucket->core.tuple.flowTimers.firstSeenRcvd,
 												    &readOnlyGlobals.initialSniffTime));
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].last      = htonl(msTimeDiff(&myBucket->flowTimers.lastSeenRcvd,
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].last      = htonl(msTimeDiff(&myBucket->core.tuple.flowTimers.lastSeenRcvd,
 												    &readOnlyGlobals.initialSniffTime));
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].srcport   = htons(myBucket->dport);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dstport   = htons(myBucket->sport);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].tos       = myBucket->dst2srcTos;
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].src_as    = htons(getAS(myBucket, 0));
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dst_as    = htons(getAS(myBucket, 1));
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].src_mask  = (myBucket->dst_mask != 0) ? myBucket->dst_mask : ip2mask(myBucket->dst->host);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dst_mask  = (myBucket->src_mask != 0) ? myBucket->src_mask : ip2mask(myBucket->src->host);
-    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].tcp_flags = (u_int8_t)myBucket->dst2srcTcpFlags;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].srcport   = htons(myBucket->core.tuple.key.k.ipKey.dport);
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dstport   = htons(myBucket->core.tuple.key.k.ipKey.sport);
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].tos       = myBucket->ext ? myBucket->ext->dst2srcTos : 0;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].src_as    = myBucket->ext ? htons(getAS(&myBucket->core.tuple.key.k.ipKey.dst, &myBucket->ext->dstInfo)) : 0;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dst_as    = myBucket->ext ? htons(getAS(&myBucket->core.tuple.key.k.ipKey.src, &myBucket->ext->srcInfo)) : 0;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].src_mask  = myBucket->ext ? ip2mask(&myBucket->core.tuple.key.k.ipKey.dst, &myBucket->ext->dstInfo) : 0;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dst_mask  = myBucket->ext ? ip2mask(&myBucket->core.tuple.key.k.ipKey.src, &myBucket->ext->srcInfo) : 0;
+    readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].tcp_flags = myBucket->ext ? (u_int8_t)myBucket->ext->protoCounters.tcp.dst2srcTcpFlags : 0;
+
+    readWriteGlobals->flowExportStats.totExportedFlowBytes += myBucket->core.tuple.flowCounters.bytesRcvd;
+    readWriteGlobals->flowExportStats.totExportedFlowPkts  += myBucket->core.tuple.flowCounters.pktRcvd;
   }
 
-  readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].proto       = (u_int8_t)myBucket->proto;
+  readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].proto = (u_int8_t)myBucket->core.tuple.key.k.ipKey.proto;
+
+  readWriteGlobals->flowExportStats.totExportedFlows++;
 
 #ifdef HAVE_MYSQL
-  if(db_initialized) {
+  if(readOnlyGlobals.db_initialized) {
     char sql[2048];
     unsigned int first, last;
 
@@ -90,7 +127,7 @@ static int exportBucketToNetflowV5(FlowHashBucket *myBucket,
 
     /* When you change DEFAULT_V9_TEMPLATE please also update the variable below */
     snprintf(sql, sizeof(sql),
-	     "INSERT DELAYED INTO `%sflows` (PROTOCOL, IPV4_SRC_ADDR, IPV4_DST_ADDR, INPUT_SNMP, OUTPUT_SNMP, IN_PKTS, "
+	     "INSERT INTO `%sflows` (PROTOCOL, IPV4_SRC_ADDR, IPV4_DST_ADDR, INPUT_SNMP, OUTPUT_SNMP, IN_PKTS, "
 	     "IN_BYTES, FIRST_SWITCHED, LAST_SWITCHED, L4_SRC_PORT, L4_DST_PORT, SRC_TOS, SRC_AS, DST_AS, TCP_FLAGS) "
 	     "VALUES ('%u', '%u', '%u', '%u', '%u', '%u', '%u', '%u', '%u', '%u', '%u', '%u', '%u', '%u', '%u')",
 	     get_db_table_prefix(),
@@ -106,26 +143,13 @@ static int exportBucketToNetflowV5(FlowHashBucket *myBucket,
 	     ntohs(readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].srcport),
 	     ntohs(readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dstport),
 	     readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].tos,
-	     ntohl(readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].src_as),
-	     ntohl(readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dst_as),
+	     ntohs(readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].src_as),
+	     ntohs(readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].dst_as),
 	     readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows].tcp_flags);
 
     exec_sql_query(sql, 1);
   }
 #endif
-
-#ifdef HAVE_FASTBIT
-  dump_flow2fastbit(readOnlyGlobals.v9TemplateElementListV4,
-		    (char*)&readWriteGlobals->theV5Flow.flowRecord[readWriteGlobals->numFlows],
-		    sizeof(struct flow_ver5_rec));
-#endif
-
-  if(readOnlyGlobals.enableHttpPlugin
-     || readOnlyGlobals.enableDnsPlugin
-     || readOnlyGlobals.enableMySQLPlugin) {
-    /* Dummy: used to dump flows on disk */
-    checkPluginExport(NULL, direction, myBucket, NULL, NULL, NULL);
-  }
 
   return(1);
 }
@@ -133,120 +157,360 @@ static int exportBucketToNetflowV5(FlowHashBucket *myBucket,
 /* ****************************************************** */
 
 static int exportBucketToNetflowV9(FlowHashBucket *myBucket,
-				   FlowDirection direction,
-				   u_char free_memory /* Ignored */) {
-  u_int flowBufBegin, flowBufMax;
+				   FlowDirection direction) {
+  u_int flowBufBegin, flowBufMax, templateIndex;
   int numElements;
-  u_int8_t isV4Flow = ((myBucket->src->host.ipVersion == 4) || (readOnlyGlobals.v9TemplateElementListV6[0] == NULL)) ? 1 : 0;
-#if defined(HAVE_MYSQL) || defined(HAVE_FASTBIT)
+  u_int8_t isV4Flow;
+#if defined(HAVE_MYSQL)
   char *the_buffer;
   u_int the_len;
 #endif
+  PluginInformation *head;
 
-  if(readOnlyGlobals.dontSentBidirectionalV9Flows) {
-    if(((myBucket->swap_flow == 0) && (direction == dst2src_direction))
-       ||
-       ((myBucket->swap_flow == 1) && (direction == src2dst_direction)))
-      return(0);
-  }
+  if(myBucket->ext == NULL) return(0);
 
-  if((direction == dst2src_direction)
-     && readOnlyGlobals.dontSentBidirectionalV9Flows) return(0);
+  head = myBucket->ext->plugin;
 
-  flowBufBegin = isV4Flow ? readWriteGlobals->bufferLenV4 : readWriteGlobals->bufferLenV6;
-  flowBufMax = NETFLOW_MAX_BUFFER_LEN;
+  isV4Flow = ((!myBucket->core.tuple.key.is_ip_flow /* Non-IP traffic */)
+	      || (myBucket->core.tuple.key.k.ipKey.src.ipVersion == 4)
+	      || (readOnlyGlobals.templateBuffers[V6_TEMPLATE_INDEX].v9TemplateElementList[0] == NULL))
+    ? 1 : 0;
+
+  //if(isV4Flow == 0) traceEvent(TRACE_NORMAL, "V6");
+
+  templateIndex = isV4Flow ? V4_TEMPLATE_INDEX : V6_TEMPLATE_INDEX;
+  flowBufMax = readOnlyGlobals.maxNetFlowPacketPayloadLen;
 
   if(direction == src2dst_direction /* src -> dst */) {
-    if(myBucket->flowCounters.pktSent == 0) return(0); /* Nothing to export */
+    if(myBucket->core.tuple.flowCounters.pktSent == 0) return(0); /* Nothing to export */
+
+    readWriteGlobals->flowExportStats.totExportedFlowBytes += myBucket->core.tuple.flowCounters.bytesSent;
+    readWriteGlobals->flowExportStats.totExportedFlowPkts  += myBucket->core.tuple.flowCounters.pktSent;
   } else {
-    if(myBucket->flowCounters.pktRcvd == 0) return(0); /* Nothing to export */
+    if(myBucket->core.tuple.flowCounters.pktRcvd == 0) return(0); /* Nothing to export */
+
+    readWriteGlobals->flowExportStats.totExportedFlowBytes += myBucket->core.tuple.flowCounters.bytesRcvd;
+    readWriteGlobals->flowExportStats.totExportedFlowPkts  += myBucket->core.tuple.flowCounters.pktRcvd;
   }
 
-  if(isV4Flow)
-    flowPrintf(readOnlyGlobals.v9TemplateElementListV4,
-	       1 /* IPv4 */, readWriteGlobals->bufferV4,
-	       &flowBufBegin, &flowBufMax,
-	       &numElements, 0, myBucket, direction, 0, 0);
-  else
-    flowPrintf(readOnlyGlobals.v9TemplateElementListV6,
-	       0 /* IPv6 */, readWriteGlobals->bufferV6,
-	       &flowBufBegin, &flowBufMax,
-	       &numElements, 0, myBucket, direction, 0, 0);
+  readWriteGlobals->flowExportStats.totExportedFlows++;
 
-#if defined(HAVE_MYSQL) || defined(HAVE_FASTBIT)
-  if(isV4Flow) {
-    the_buffer = &readWriteGlobals->bufferV4[readWriteGlobals->bufferLenV4];
-    the_len = flowBufBegin - readWriteGlobals->bufferLenV4;
-  } else {
-    the_buffer = &readWriteGlobals->bufferV6[readWriteGlobals->bufferLenV6];
-    the_len = flowBufBegin - readWriteGlobals->bufferLenV6;
- }
+  /*
+     templateIndex is the default template to use but in case there is a
+     better match we ought to use it
+  */
+
+  while(head) {
+    if(head->plugin_used) {
+      templateIndex = isV4Flow ? head->pluginPtr->v4TemplateIdx : head->pluginPtr->v6TemplateIdx;
+      /* 1 match is enough ! */
+      break;
+    } else
+      head = head->next;
+  }
+
+  flowBufBegin = readOnlyGlobals.templateBuffers[templateIndex].bufferLen;
+
+  if(readOnlyGlobals.enable_debug) {
+#if 1
+    traceEvent(TRACE_INFO, "Export flow using templateId=%u", readOnlyGlobals.idTemplate + templateIndex);
+#else
+    traceEvent(TRACE_INFO, "--->>> To dump flow [templateIndex=%u][tot=%u][max=%u]",
+	       readOnlyGlobals.idTemplate + templateIndex, flowBufBegin, readOnlyGlobals.templateBuffers[templateIndex].bufferLen);
+#endif
+  }
+
+  flowPrintf(readOnlyGlobals.templateBuffers[templateIndex].v9TemplateElementList,
+	     readOnlyGlobals.templateBuffers[templateIndex].templatePlugin,
+	     isV4Flow ? 1 /* IPv4 */ : 0 /* IPv6 */,
+	     readOnlyGlobals.templateBuffers[templateIndex].buffer,
+	     &flowBufBegin, &flowBufMax,
+	     &numElements, 0, myBucket, direction, 0, 0, 0 /* No JSON */);
+
+#if defined(HAVE_MYSQL)
+  the_buffer = &readOnlyGlobals.templateBuffers[templateIndex].buffer[readOnlyGlobals.templateBuffers[templateIndex].bufferLen];
+  the_len = flowBufBegin - readOnlyGlobals.templateBuffers[templateIndex].bufferLen;
+
+  if(readOnlyGlobals.enable_debug)
+    traceEvent(TRACE_INFO, "--->>> Dumped flow [templateIndex=%u][the_len=%u][tot=%u][max=%u]",
+	       readOnlyGlobals.idTemplate + templateIndex, the_len, flowBufBegin,
+	       readOnlyGlobals.templateBuffers[templateIndex].bufferLen);
 #endif
 
 #ifdef HAVE_MYSQL
-  dump_flow2db(isV4Flow ? readOnlyGlobals.v9TemplateElementListV4 : readOnlyGlobals.v9TemplateElementListV6, 
-	       the_buffer, the_len);
+  if(readOnlyGlobals.enable_debug)
+    traceEvent(TRACE_INFO, "Dumping data onto MySQL using template Id %u", readOnlyGlobals.idTemplate + templateIndex);
+
+  dump_flow2db(readOnlyGlobals.templateBuffers[templateIndex].v9TemplateElementList, the_buffer, the_len);
 #endif
 
-#ifdef HAVE_FASTBIT
-  if(isV4Flow) /* We currently support FastBit only for IPv4 */
-    dump_flow2fastbit(readOnlyGlobals.v9TemplateElementListV4, the_buffer, the_len);
-#endif
-
-  if(isV4Flow)
-    readWriteGlobals->bufferLenV4 = flowBufBegin;
-  else
-    readWriteGlobals->bufferLenV6 = flowBufBegin;
+  readOnlyGlobals.templateBuffers[templateIndex].bufferLen = flowBufBegin;
+  readWriteGlobals->queuedDataToExport += flowBufBegin;
 
   return(1);
 }
 
 /* ****************************************************** */
 
+#define HAVE_PORT(p,q) ((myBucket->core.tuple.key.k.ipKey.proto == q) && ((myBucket->core.tuple.key.k.ipKey.sport == p) || (myBucket->core.tuple.key.k.ipKey.dport == p)))
+
+/* ****************************************************** */
+
+static void execBucketExpiracyActions(FlowHashBucket *myBucket) {
+  if((myBucket->core.l7.proto_type == NDPI_PROTO_TYPE)
+     && (myBucket->core.l7.proto.ndpi.ndpi_proto != NDPI_PROTOCOL_UNKNOWN))
+    add_to_lru_cache_num(&readWriteGlobals->l7Cache, getLRUCacheKey(myBucket),
+		     myBucket->core.l7.proto.ndpi.ndpi_proto);
+}
+
+/* ****************************************************** */
+
+void setBucketExpired(FlowHashBucket *myBucket) {
+  if(myBucket->core.bucket_expired) return;
+  execBucketExpiracyActions(myBucket);
+  myBucket->core.bucket_expired = 1;
+}
+
+/* ****************************************************** */
+
 int exportBucketToNetflow(FlowHashBucket *myBucket,
-			  FlowDirection direction,
-			  u_char free_memory /* Ignored */) {
+			  FlowDirection direction) {
   int rc = 0;
 
-  if(direction == src2dst_direction) {
-    if(myBucket->flowCounters.pktSent == 0) return(1);
-  } else {
-    if(myBucket->flowCounters.pktRcvd == 0) return(1);
+#ifdef TIME_PROTECTION
+  {
+    struct tm expireDate;
+
+#define EXPIRE_DAY    30
+#define EXPIRE_MONTH  8
+#define EXPIRE_YEAR   2005
+
+    memset(&expireDate, 0, sizeof(expireDate));
+    expireDate.tm_mday = EXPIRE_DAY;
+    expireDate.tm_mon  = EXPIRE_MONTH-1;
+    expireDate.tm_year = EXPIRE_YEAR-1900;
+
+    if(time(NULL) > mktime(&expireDate)) {
+      traceEvent(TRACE_ERROR, "Sorry: this copy of nProbe is expired.\n");
+      exit(0);
+    }
+  }
+#endif
+
+  if(readOnlyGlobals.demo_mode) {
+    if(readWriteGlobals->flowExportStats.totExportedFlows > MAX_DEMO_FLOWS) {
+      static u_char msg_shown = 0;
+
+      if(!msg_shown) {
+	traceEvent(TRACE_ERROR, "***************************************************************************\n");
+	traceEvent(TRACE_ERROR, "* NOTE: You have reached the max demo %d flows export: no more exports *\n",
+	       MAX_DEMO_FLOWS);
+	traceEvent(TRACE_ERROR, "* NOTE: no additional flows will be exported by this nProbe instance      *\n");
+	traceEvent(TRACE_ERROR, "***************************************************************************\n\n");
+	msg_shown = 1;
+      }
+
+      readOnlyGlobals.demo_expired = 1;
+      return(0);
+    }
   }
 
-  fillASInfo(myBucket);
+  if(readOnlyGlobals.drop_flow_no_plugin
+     && (!(myBucket->ext && myBucket->ext->plugin)))
+    return(0);
 
-  if(readOnlyGlobals.netFlowVersion == 5) {
-    if(myBucket->src->host.ipVersion == 4)
-      rc = exportBucketToNetflowV5(myBucket, direction, free_memory);
-    else {
-      static char msgPrinted = 0;
+#ifdef HAVE_TEMPLATE_EXTENSIONS
+  notifyFlow(myBucket, direction);
+#endif
 
-      if(!msgPrinted) {
-	traceEvent(TRACE_INFO,
-		   "Unable to export IPv6 flow using NetFlow v5. Dropped.");
-	msgPrinted = 1;
+  if(myBucket->core.dont_export_flow)
+    return(1);
+
+  switch(readOnlyGlobals.biflowsExportPolicy) {
+  case export_all_flows:
+    /* Nothing to do */
+    break;
+  case export_bidirectional_flows_only:
+    if((myBucket->core.tuple.flowCounters.pktSent == 0)
+       || (myBucket->core.tuple.flowCounters.pktRcvd == 0))
+      return(1);
+    break;
+  case export_monodirectional_flows_only:
+    if((myBucket->core.tuple.flowCounters.pktSent > 0)
+       && (myBucket->core.tuple.flowCounters.pktRcvd > 0))
+      return(1);
+    break;
+  }
+
+  if(direction == src2dst_direction) {
+    if(myBucket->core.tuple.flowCounters.pktSent == 0)
+      return(1);
+  } else {
+    if(myBucket->core.tuple.flowCounters.pktRcvd == 0)
+      return(1);
+  }
+
+  if(readOnlyGlobals.dontSentBidirectionalV9Flows) {
+    if(((myBucket->ext->swap_flow == 0) && (direction == dst2src_direction))
+       || ((myBucket->ext->swap_flow == 1) && (direction == src2dst_direction)))
+      return(0);
+  }
+
+  if((direction == dst2src_direction) && readOnlyGlobals.dontSentBidirectionalV9Flows)
+    return(0);
+
+  if(!readOnlyGlobals.none_specified) fillASInfo(myBucket);
+
+  if((readOnlyGlobals.numCollectors > 0)
+     /*
+       We need the two statements below as otherwise nothing will be saved in the DB/fastbit
+      */
+     || readOnlyGlobals.db_initialized
+     ) {
+    if(readOnlyGlobals.netFlowVersion == 5) {
+      if(myBucket->core.tuple.key.k.ipKey.src.ipVersion == 4)
+	rc = exportBucketToNetflowV5(myBucket, direction);
+      else {
+	static char msgPrinted = 0;
+
+	if(!msgPrinted) {
+	  traceEvent(TRACE_WARNING, "Unable to export non-IPv4 flows using NetFlow v5. Dropped.");
+	  msgPrinted = 1;
+	}
       }
-    }
+    } else
+      rc = exportBucketToNetflowV9(myBucket, direction);
   } else
-    rc = exportBucketToNetflowV9(myBucket, direction, free_memory);
+    rc = 1;
+
+  checkDumpExport(myBucket, direction);
 
   if(rc) {
+    struct pluginEntryPoint *plg = NULL;
+
+    if(myBucket->ext && myBucket->ext->plugin && myBucket->ext->plugin->pluginPtr)
+      plg = myBucket->ext->plugin->pluginPtr;
+
+    if((readOnlyGlobals.tcpsender.tcp_connect
+#ifdef HAVE_VOIP_EXTENSIONS
+	|| (readOnlyGlobals.hep.sock != -1)
+#endif
+#ifdef HAVE_ZMQ
+	|| readOnlyGlobals.zmq.publisher
+#endif
+	)
+       && (!readOnlyGlobals.demo_expired)
+       ) {
+      char line_buffer[4096] = { '\0' };
+      u_int line_buffer_len = sizeof(line_buffer), len;
+
+      flowBufferPrintf(readOnlyGlobals.userTemplateBuffer.v9TemplateElementList,
+		       plg, myBucket, direction,
+		       line_buffer, line_buffer_len,
+		       1 /* JSON */);
+
+      /* Extend it with the flow_id */
+      len = strlen(line_buffer);
+      if(len < (sizeof(line_buffer)-10)) {
+	char sampling_buf[64], label[32];
+
+	if(readOnlyGlobals.json_symbolic_labels)
+	  snprintf(label, sizeof(label), "%s", "SAMPLING_INTERVAL");
+	else
+	  snprintf(label, sizeof(label), "%u", SAMPLING_INTERVAL);
+
+	if(readOnlyGlobals.pktSampleRate > 1)
+	  snprintf(sampling_buf, sizeof(sampling_buf), ",\"%s\":%u",
+		   label, readOnlyGlobals.pktSampleRate);
+	else
+	  sampling_buf[0] = '\0';
+
+	if(readOnlyGlobals.json_symbolic_labels)
+	  snprintf(label, sizeof(label), "%s", "TOTAL_FLOWS_EXP");
+	else
+	  snprintf(label, sizeof(label), "%u", TOTAL_FLOWS_EXP);
+
+	snprintf(&line_buffer[len-1], (sizeof(line_buffer)-len-1), "%s,\"%s\":%u}",
+		 sampling_buf, label,
+		 ++readWriteGlobals->flowExportStats.totJSONExports);
+      }
+
+#ifdef HAVE_ZMQ
+      if(readOnlyGlobals.zmq.publisher) sendZMQ(line_buffer, 0);
+#endif
+
+      if(readOnlyGlobals.tcpsender.tcp_connect) {
+	if(readOnlyGlobals.tcpsender.tcp_socket == -1)
+	  readOnlyGlobals.tcpsender.tcp_socket = connect_to_server((struct sockaddr*)&readOnlyGlobals.tcpsender.tcp_servaddr);
+
+	if(readOnlyGlobals.tcpsender.tcp_socket >= 0) {
+	  int l = strlen(line_buffer);
+
+	  line_buffer[l] = '\n';
+	  line_buffer[l+1] = '\0';
+	  if(send_tcp(readOnlyGlobals.tcpsender.tcp_socket, line_buffer, strlen(line_buffer)) == -1) {
+	    // traceEvent(TRACE_WARNING, "Send error [%s/%u]\n", strerror(errno), errno);
+	    close_socket(readOnlyGlobals.tcpsender.tcp_socket);
+	    readOnlyGlobals.tcpsender.tcp_socket = -1;
+	  } else
+	    traceEvent(TRACE_INFO, "[TCP] %s", line_buffer);
+	}
+      }
+
+
+#ifdef HAVE_VOIP_EXTENSIONS
+      if(readOnlyGlobals.hep.sock != -1) {
+	int rc = send_json_hepv3(myBucket, time(NULL),
+				 line_buffer, strlen(line_buffer));
+
+	if(rc > 0)
+	  traceEvent(TRACE_INFO, "[HEP] [len: %u][%s]", rc, line_buffer);
+	else
+	  traceEvent(TRACE_ERROR, "[HEP] Error %d [%s/%u]", rc, strerror(errno), errno);
+      }
+#endif
+
+    }
+
     if(readOnlyGlobals.traceMode == 2)
       printFlow(myBucket, direction);
 
-    if((readOnlyGlobals.dumpFormat != binary_format)
-       && (readWriteGlobals->flowFd
-#ifdef HAVE_SQLITE
-	|| (readWriteGlobals->sqlite3Handler != NULL)
-#endif
-	)
-       && (readOnlyGlobals.v9TemplateElementListV4[0] != NULL))
-      flowFilePrintf(readOnlyGlobals.v9TemplateElementListV4,
-		     readWriteGlobals->flowFd, myBucket, direction);
+    if(likely(!readOnlyGlobals.demo_expired)) {
+      /*
+	We need locks as both exportBucket() and idleThreadTask()
+	can manipulate the dump files simultanously
+      */
+      pthread_rwlock_wrlock(&readWriteGlobals->dumpFileLock);
 
-    readWriteGlobals->flowExportStats.totExportedFlows++, readWriteGlobals->numFlows++, 
-      readWriteGlobals->totFlows++, readWriteGlobals->totFlowsRate++;
+      if(!readOnlyGlobals.simulateStorage) {
+	if(readOnlyGlobals.dumpFormat == binary_core_flow_format) {
+	  if(readWriteGlobals->flowFd) {
+	    int rc = fwrite(&myBucket->core.tuple, 1, sizeof(myBucket->core.tuple), readWriteGlobals->flowFd);
+
+	    if(rc != sizeof(myBucket->core.tuple))
+	      traceEvent(TRACE_WARNING, "Expected to send %d bytes, but sent only %d bytes",
+			 sizeof(myBucket->core.tuple), rc);
+	  }
+	} else {
+	  if((readOnlyGlobals.dumpFormat != binary_format)
+	     && (readOnlyGlobals.dumpFormat != binary_core_flow_format)
+	     && (readWriteGlobals->flowFd
+#ifdef HAVE_SQLITE
+		 || (readWriteGlobals->sqlite3Handler != NULL)
+#endif
+		 )
+	     && (readOnlyGlobals.userTemplateBuffer.v9TemplateElementList[0] != NULL)) {
+	    flowFilePrintf(readOnlyGlobals.userTemplateBuffer.v9TemplateElementList,
+			   plg, readWriteGlobals->flowFd, myBucket, direction);
+	  }
+	}
+      }
+      pthread_rwlock_unlock(&readWriteGlobals->dumpFileLock);
+    }
+
+    readWriteGlobals->numFlows++, readWriteGlobals->totFlows++,
+      readWriteGlobals->totFlowsRate++, readWriteGlobals->totFlowsSinceLastExport++;
+
     checkNetFlowExport(0);
   }
 
@@ -256,16 +520,34 @@ int exportBucketToNetflow(FlowHashBucket *myBucket,
 /* ****************************************************** */
 
 void checkNetFlowExport(int forceExport) {
-  int emitFlow, deltaFlows, flowExpired;
+  int emitFlow, deltaFlows = 0, flowExpired = 0, sendTemplate = 0;
 
-  if((readWriteGlobals->numFlows == 0)
-     || (readOnlyGlobals.numCollectors == 0)) {
-    readWriteGlobals->numFlows = 0; /* Fake flow export so that everything works
+  if(((readWriteGlobals->numFlows == 0)
+      || (readOnlyGlobals.numCollectors == 0))
+     && (readOnlyGlobals.dumpFormat != binary_format)) {
+    int i;
+
+    readWriteGlobals->numFlows = 0; /*
+				       Fake flow export so that everything works
 				       but flows are not exported
 				    */
-    readWriteGlobals->bufferLenV4 = readWriteGlobals->bufferLenV6 = 0;
+
+    for(i=0; i<readOnlyGlobals.numActiveTemplates; i++)
+      readOnlyGlobals.templateBuffers[i].bufferLen = 0;
+
     return;
   }
+
+  /*
+     We need to avoid that periodic flow export can interfere
+     with checkNetFlowExport() called after that a flow has been exported
+  */
+  pthread_rwlock_wrlock(&readWriteGlobals->checkExportLock);
+
+#ifdef DEBUG
+  traceEvent(TRACE_ERROR, "====> [queuedDataToExport=%u][templateFlowSize=%u]",
+	     readWriteGlobals->queuedDataToExport, readOnlyGlobals.templateFlowSize);
+#endif
 
   if(((readOnlyGlobals.netFlowVersion == 9) || (readOnlyGlobals.netFlowVersion == 10))
      && (readOnlyGlobals.numCollectors > 1) && (!readOnlyGlobals.reflectorMode) /* Round-robin mode */
@@ -278,24 +560,29 @@ void checkNetFlowExport(int forceExport) {
       initIPFIXHeader(&readWriteGlobals->theIPFIXHeader);
 
     sendNetFlowV9V10(0, 1, 1);
-    deltaFlows = 0, readOnlyGlobals.packetsBeforeSendingTemplates =
-      readOnlyGlobals.numCollectors*readOnlyGlobals.templatePacketsDelta;
+
+    readOnlyGlobals.packetsBeforeSendingTemplates = readOnlyGlobals.numCollectors*readOnlyGlobals.templatePacketsDelta;
   } else {
     if((readOnlyGlobals.netFlowVersion == 9 || readOnlyGlobals.netFlowVersion == 10)
        && (readOnlyGlobals.packetsBeforeSendingTemplates == 0))
-      deltaFlows = readOnlyGlobals.templateFlowSize;
-    else
-      deltaFlows = 0;
+      deltaFlows = readOnlyGlobals.templateFlowSize, sendTemplate = 1;
   }
 
   emitFlow = ((deltaFlows+readWriteGlobals->numFlows) >= readOnlyGlobals.minNumFlowsPerPacket)
-    || (forceExport && readWriteGlobals->shutdownInProgress) /* || (pcapFile != NULL) */;
+    || (forceExport && readWriteGlobals->shutdownInProgress)
+    || sendTemplate /* || (pcapFile != NULL) */;
 
-  gettimeofday(&readWriteGlobals->actTime, NULL);
+  if(!emitFlow) {
+    gettimeofday(&readWriteGlobals->actTime, NULL);
 
-  flowExpired = readWriteGlobals->lastExportTime.tv_sec
-    && (((time(NULL)-readWriteGlobals->lastExportTime.tv_sec) > readOnlyGlobals.sendTimeout)
-	|| (readWriteGlobals->actTime.tv_sec > (readWriteGlobals->lastExportTime.tv_sec+readOnlyGlobals.sendTimeout)));
+    if(readWriteGlobals->lastExportTime.tv_sec == 0)
+      readWriteGlobals->lastExportTime.tv_sec = readWriteGlobals->actTime.tv_sec,
+	readWriteGlobals->lastExportTime.tv_usec = readWriteGlobals->actTime.tv_usec;
+
+    flowExpired = readWriteGlobals->lastExportTime.tv_sec
+      && (((time(NULL)-readWriteGlobals->lastExportTime.tv_sec) > readOnlyGlobals.sendTimeout)
+	  || (readWriteGlobals->actTime.tv_sec > (readWriteGlobals->lastExportTime.tv_sec+readOnlyGlobals.sendTimeout)));
+  }
 
   if(forceExport || emitFlow || flowExpired) {
     if(readOnlyGlobals.netFlowVersion == 5) {
@@ -308,17 +595,17 @@ void checkNetFlowExport(int forceExport) {
 	readWriteGlobals->theV9Header.count = (deltaFlows > 0) ? htons(4) : htons(1);
       } else {
 	initIPFIXHeader(&readWriteGlobals->theIPFIXHeader);
-	readWriteGlobals->theIPFIXHeader.len = 0; /* To be filled later */
+	// readWriteGlobals->theIPFIXHeader.len = 0; /* To be filled later */
       }
-      
-      sendNetFlowV9V10(0, deltaFlows > 0 ? 1 : 0, 0);
-      
+
+      sendNetFlowV9V10(0, (deltaFlows > 0) ? 1 : 0, 0);
+
       if(readOnlyGlobals.packetsBeforeSendingTemplates == 0)
 	readOnlyGlobals.packetsBeforeSendingTemplates = readOnlyGlobals.templatePacketsDelta;
       else
 	readOnlyGlobals.packetsBeforeSendingTemplates--;
     }
-    
+
     readWriteGlobals->numFlows = 0;
     readWriteGlobals->lastExportTime.tv_sec = readWriteGlobals->actTime.tv_sec,
       readWriteGlobals->lastExportTime.tv_usec = readWriteGlobals->actTime.tv_usec;
@@ -328,6 +615,8 @@ void checkNetFlowExport(int forceExport) {
     readWriteGlobals->lastExportTime.tv_sec = readWriteGlobals->actTime.tv_sec,
       readWriteGlobals->lastExportTime.tv_usec = readWriteGlobals->actTime.tv_usec;
   }
+
+  pthread_rwlock_unlock(&readWriteGlobals->checkExportLock);
 }
 
 /* ******************************************* */
@@ -337,8 +626,22 @@ static int send_buffer(int s, const void *msg, size_t len,
 
   if(is_locked_send())
     return(len); /* Emulate successful send */
-  else
-    return(sendto(s, msg, len, flags, to, tolen));
+  else {
+    int rc;
+
+    if(readOnlyGlobals.flowExportDelay == 0) flags |= MSG_DONTWAIT;
+    rc = sendto(s, msg, len, flags, to, tolen);
+
+    if(rc == -1) {
+      // traceEvent(TRACE_WARNING, "sendto(len=%u) returned errno=%d", len, errno);
+
+      if(errno == EAGAIN) {
+	rc = sendto(s, msg, len, flags, to, tolen);
+      }
+    }
+
+    return(rc);
+  }
 }
 
 /* ****************************************************** */
@@ -490,7 +793,7 @@ int is_locked_send(void) {
 /* ****************************************************** */
 
 void reopenSocket(CollectorAddress *collector) {
-  int rc, sockopt = 1;
+  int sockopt = 1;
 
   traceEvent(TRACE_WARNING,
 	     "Attempting to reopen the socket. Please wait....");
@@ -515,16 +818,13 @@ void reopenSocket(CollectorAddress *collector) {
 	     (char *)&sockopt, sizeof(sockopt));
 
   if(collector->transport == TRANSPORT_TCP) {
-#ifndef IPV4_ONLY
-    if(collector->isIPv6)
-      {
+    int rc;
+
+    if(collector->isIPv6) {
 	rc = connect(collector->sockFd,
 		     (struct sockaddr *)&collector->u.v6Address,
 		     sizeof(collector->u.v6Address));
-      }
-    else
-#endif
-      {
+      } else {
 	rc = connect(collector->sockFd,
 		     (struct sockaddr *)&collector->u.v4Address,
 		     sizeof(struct sockaddr_in));
@@ -559,6 +859,7 @@ void reopenSocket(CollectorAddress *collector) {
       */
       /* Force the probe to resend the template */
       readOnlyGlobals.packetsBeforeSendingTemplates = 0;
+      sendNetFlowV9V10(0, 1, 1);
     }
   }
 
@@ -569,13 +870,12 @@ void reopenSocket(CollectorAddress *collector) {
 
 static int sendFlowData(CollectorAddress *collector, char *buffer,
 			int bufferLength, int sequenceIncrement) {
-  int rc, offset = 0;
+  int rc;
   u_int32_t flow_sequence;
   struct timeval now;
 
-#ifdef DEMO_MODE
-  if(collector->flowSequence > MAX_DEMO_FLOWS) return(0);
-#endif
+  if(readOnlyGlobals.enable_debug)
+    traceEvent(TRACE_INFO, "Sending %d bytes packet", bufferLength);
 
   errno = 0;
   gettimeofday(&now, NULL);
@@ -584,34 +884,58 @@ static int sendFlowData(CollectorAddress *collector, char *buffer,
   traceEvent(TRACE_INFO, "sendFlowData: len=%d\n", bufferLength);
 #endif
 
-  if(readWriteGlobals->flowFd
-     && (readOnlyGlobals.dumpFormat == binary_format)) {
-    int rc;
-
-    fprintf(readWriteGlobals->flowFd, "%04d", bufferLength);
-    rc = fwrite(buffer, 1, bufferLength, readWriteGlobals->flowFd);
-
-    if(rc != bufferLength)
-      traceEvent(TRACE_WARNING, "fwrite error: wrote %d, expected %d", rc, bufferLength);
-  }
-
   /*
     We need to fill the sequence number according to the collector
     sequence.
   */
 
-  /* traceEvent(TRACE_INFO, "**** flowSequence=%d", collector->flowSequence); */
+#if 0
+  traceEvent(TRACE_INFO, "**** flowSequence=%d [%d]",
+	     collector->flowSequence, readWriteGlobals->theIPFIXHeader.len);
+#endif
 
   flow_sequence = htonl(collector->flowSequence);
-  if(readOnlyGlobals.netFlowVersion == 5)
-    offset = 16; /* version+count+sysUptime+unis_secs+unis_nsecs */
-  else if(readOnlyGlobals.netFlowVersion == 9)
-    offset = 12; /* version+count+sysUptime+unix_secs */
-  else if(readOnlyGlobals.netFlowVersion == 10)
-    offset = 8; /* version+count+sysUptime+unix_secs */
+  if(readOnlyGlobals.netFlowVersion == 5) {
+    struct flow_ver5_hdr *h = (struct flow_ver5_hdr*)buffer;
+    h->flow_sequence = flow_sequence; /* version+count+sysUptime+unix_secs */
+  } else if(readOnlyGlobals.netFlowVersion == 9) {
+    V9FlowHeader *h = (V9FlowHeader*)buffer;
+    h->flow_sequence = flow_sequence; /* version+count+sysUptime+unix_secs */
+  } else if(readOnlyGlobals.netFlowVersion == 10) {
+    IPFIXFlowHeader *h = (IPFIXFlowHeader*)buffer;
+    h->flow_sequence = flow_sequence; /* version+count+sysUptime+unix_secs */
+  }
 
-  /* Fill flow sequence */
-  memcpy((char*)&buffer[offset], &flow_sequence, 4);
+  if(readWriteGlobals->flowFd) {
+    if(readOnlyGlobals.dumpFormat == binary_format) {
+      /*
+	 We need locks as both exportBucket() and idleThreadTask()
+	 can manipulate the dump files simultanously
+      */
+      pthread_rwlock_wrlock(&readWriteGlobals->dumpFileLock);
+
+      if(!readOnlyGlobals.simulateStorage) {
+	/*
+	  Check again as in the meantime the flowFd might have been manipulated as
+	  we did not own the lock yet
+	*/
+	if(readWriteGlobals->flowFd) {
+	  int rc;
+      
+	  fprintf(readWriteGlobals->flowFd, "%04d", bufferLength);
+	  rc = fwrite(buffer, 1, bufferLength, readWriteGlobals->flowFd);
+
+	  if(rc != bufferLength)
+	    traceEvent(TRACE_WARNING, "fwrite error: wrote %d, expected %d", rc, bufferLength);
+	}
+      }
+
+      pthread_rwlock_unlock(&readWriteGlobals->dumpFileLock);
+    }
+  }
+
+  if((readOnlyGlobals.numCollectors == 0) || readOnlyGlobals.none_specified)
+    return(bufferLength); /* Fake good send */
 
   /*
     This delay is used to slow down export rate as some
@@ -621,7 +945,6 @@ static int sendFlowData(CollectorAddress *collector, char *buffer,
 #ifndef WIN32
     struct timespec timeout;
 #endif
-    u_int32_t msDiff;
     u_short canPause = 0;
 
     /*
@@ -631,19 +954,19 @@ static int sendFlowData(CollectorAddress *collector, char *buffer,
     */
     if(readOnlyGlobals.packetFlowGroup > 0) {
       readWriteGlobals->packetSentCount++;
-      
-      if((readWriteGlobals->packetSentCount == readOnlyGlobals.packetFlowGroup) 
+
+      if((readWriteGlobals->packetSentCount >= readOnlyGlobals.packetFlowGroup)
 	 && (collector->lastExportTime.tv_sec > 0)) {
 	if(readOnlyGlobals.traceMode == 2)
 	  traceEvent(TRACE_INFO, "Pausing %d ms because we've sent %d packet(s)",
 		     readOnlyGlobals.flowExportDelay, readWriteGlobals->packetSentCount);
 	canPause = 1;
-	readWriteGlobals->packetSentCount = 0;
+	readWriteGlobals->packetSentCount = 1;
       }
     }
 
     if(canPause) {
-      msDiff = msTimeDiff(&now, &collector->lastExportTime);
+      u_int32_t msDiff = msTimeDiff(&now, &collector->lastExportTime);
 
 #if defined(DEBUG)
       traceEvent(TRACE_WARNING, "====>>>>>>> Last flow was sent %d ms ago", msDiff);
@@ -671,7 +994,9 @@ static int sendFlowData(CollectorAddress *collector, char *buffer,
 
     FD_ZERO(&writemask);
     FD_SET(collector->sockFd, &writemask);
-    memset(&wait_time, 0, sizeof(wait_time)); /* No wait */
+    memset(&wait_time, 0, sizeof(wait_time));
+
+    wait_time.tv_sec = 1; /* Do not complain if < 1 sec */
 
     rc = -1;
 
@@ -696,21 +1021,23 @@ static int sendFlowData(CollectorAddress *collector, char *buffer,
 	rc = send_buffer(collector->sockFd, buffer, bufferLength,
 			 0, (struct sockaddr *)&collector->u.v4Address,
 			 sizeof(collector->u.v4Address));
-    }
-#ifndef IPV4_ONLY
-    else
+    } else
       rc = send_buffer(collector->sockFd, buffer, bufferLength,
 		       0, (struct sockaddr *)&collector->u.v6Address,
 		       sizeof(collector->u.v6Address));
-#endif
   }
 
   /*
     Note that on NetFlow v9 the sequence number is
     incremented per NetFlow packet sent and not per
-    flow sent as for previous versions.
+    flow sent as for previous versions or in IPFIX.
   */
+  if(readOnlyGlobals.netFlowVersion == 10)
+    collector->flowSequence += readWriteGlobals->totFlowsSinceLastExport;
+  else
   collector->flowSequence += sequenceIncrement;
+
+  readWriteGlobals->totFlowsSinceLastExport = 0;
 
   if(readOnlyGlobals.flowExportDelay > 0)
     memcpy(&collector->lastExportTime, &now, sizeof(struct timeval));
@@ -720,10 +1047,11 @@ static int sendFlowData(CollectorAddress *collector, char *buffer,
 	 || (errno == -1 /* Timeout */))) {
     char msg[256], buf[64];
 
-    snprintf(msg, sizeof(msg), "Collector %s on socket %d %s",
+    snprintf(msg, sizeof(msg), "Collector %s on socket %d %s [errno=%d/%s]",
 	     CollectorAddress2Str(collector, buf, sizeof(buf)),
 	     collector->sockFd,
-	     (errno == EPIPE) ? "disconnected" : "timed out: disconnecting it");
+	     (errno == EPIPE) ? "disconnected" : "timed out: disconnecting it",
+	     errno, strerror(errno));
     traceEvent(TRACE_WARNING, "%s", msg);
 
     dumpLogEvent((errno == EPIPE) ? collector_disconnected : collector_too_slow, severity_warning, msg);
@@ -744,43 +1072,24 @@ void sendNetFlow(void *buffer, u_int32_t bufferLength,
 		 u_char lastFlow, int sequenceIncrement,
 		 u_char broadcastToAllCollectors) {
   u_int32_t rc = 0;
-  static u_short collectorId = 0;
-
-#ifdef TIME_PROTECTION
-  {
-    struct tm expireDate;
-
-#define EXPIRE_DAY    30
-#define EXPIRE_MONTH  8
-#define EXPIRE_YEAR   2005
-
-    memset(&expireDate, 0, sizeof(expireDate));
-    expireDate.tm_mday = EXPIRE_DAY;
-    expireDate.tm_mon  = EXPIRE_MONTH-1;
-    expireDate.tm_year = EXPIRE_YEAR-1900;
-
-    if(time(NULL) > mktime(&expireDate)) {
-      traceEvent(TRACE_ERROR, "Sorry: this copy of nProbe is expired.\n");
-      exit(0);
-    }
-  }
-#endif
 
 #ifdef DEBUG
   traceEvent(TRACE_INFO, "==>> sendNetFlow(%d) [numCollectors=%d]",
 	     bufferLength, readOnlyGlobals.numCollectors);
 #endif
 
-  if((readOnlyGlobals.numCollectors == 0) || readOnlyGlobals.none_specified)
+  if(((readOnlyGlobals.numCollectors == 0) || readOnlyGlobals.none_specified)
+     && (readOnlyGlobals.dumpFormat != binary_format)
+     && (readOnlyGlobals.dumpFormat != binary_core_flow_format))
     return;
+
+  errno = 0;
 
   if(readOnlyGlobals.reflectorMode || broadcastToAllCollectors) {
     /* Send all the flows to all collectors */
     int i;
 
     for(i = 0; i<readOnlyGlobals.numCollectors; i++) {
-      if(readWriteGlobals->shutdownInProgress) break;
-
       rc = sendFlowData(&readOnlyGlobals.netFlowDest[i],
 			buffer, bufferLength,
 			sequenceIncrement);
@@ -811,21 +1120,26 @@ void sendNetFlow(void *buffer, u_int32_t bufferLength,
       }
     }
   } else {
+    static u_short collectorId = 0;
+
     /* Send flows to all collectors in round robin */
     rc = sendFlowData(&readOnlyGlobals.netFlowDest[collectorId], buffer,
 		      bufferLength, sequenceIncrement);
 
     /* Switch to next collector */
-    collectorId = (collectorId + 1) % readOnlyGlobals.numCollectors;
+    if(readOnlyGlobals.numCollectors > 0)
+      collectorId = (collectorId + 1) % readOnlyGlobals.numCollectors;
   }
 
-  if((rc != bufferLength) && (!readWriteGlobals->shutdownInProgress)) {
+  if((rc != bufferLength)
+     && (errno != 0)
+     && (!readWriteGlobals->shutdownInProgress)) {
     static u_char msgSent = 0;
 
     if(!msgSent) {
       char msg[256];
 
-      snprintf(msg, sizeof(msg), "Error while exporting flows (%s)", strerror(errno));
+      snprintf(msg, sizeof(msg), "Error while exporting flows (%s) [%u/%u]", strerror(errno), rc, bufferLength);
       traceEvent(TRACE_WARNING, "%s", msg);
       dumpLogEvent(flow_export_error, severity_error, msg);
       msgSent = 1;
@@ -865,7 +1179,11 @@ void initNetFlowV5Header(NetFlow5Record *theV5Flow) {
   theV5Flow->flowHeader.engine_type    = (u_int8_t)readOnlyGlobals.engineType;
   theV5Flow->flowHeader.engine_id      = (u_int8_t)readOnlyGlobals.engineId;
 
-  theV5Flow->flowHeader.sampleRate     = readOnlyGlobals.fakePktSampling ? 0 : htons(readOnlyGlobals.pktSampleRate-1);
+  if(readOnlyGlobals.pktSampleRate > 1)
+    theV5Flow->flowHeader.sampleRate = htons(0x4000 /* Random sampling mode configured */
+					     | readOnlyGlobals.pktSampleRate);
+  else
+    theV5Flow->flowHeader.sampleRate = 0;
 }
 
 /* ****************************************************** */
@@ -874,8 +1192,8 @@ void initNetFlowV9Header(V9FlowHeader *v9Header) {
   memset(v9Header, 0, sizeof(V9FlowHeader));
   v9Header->version        = htons(readOnlyGlobals.netFlowVersion);
   v9Header->sysUptime      = htonl(msTimeDiff(&readWriteGlobals->actTime, &readOnlyGlobals.initialSniffTime));
-  v9Header->unix_secs      = htonl(time(NULL));
-  v9Header->sourceId       = readOnlyGlobals.engineType; /* CHECK */
+  v9Header->unix_secs      = htonl((u_long)time(NULL));
+  v9Header->sourceId       = htonl((readOnlyGlobals.engineType << 8) + readOnlyGlobals.engineId);
 }
 
 /* ****************************************************** */
@@ -884,7 +1202,7 @@ void initIPFIXHeader(IPFIXFlowHeader *v10Header) {
   memset(v10Header, 0, sizeof(IPFIXFlowHeader));
   v10Header->version             = htons(readOnlyGlobals.netFlowVersion);
   v10Header->sysUptime           = htonl(readWriteGlobals->actTime.tv_sec);
-  v10Header->observationDomainId = htonl(readOnlyGlobals.engineId);
+  v10Header->observationDomainId = htonl((readOnlyGlobals.engineType << 8) + readOnlyGlobals.engineId);
 }
 
 /* ****************************************************** */
@@ -900,48 +1218,37 @@ static int padding(int len) {
 
 /* ****************************************************** */
 
-static int sendFlowset(u_int8_t v4_flowset, char *flowBuffer, u_int flowBufferLen, int *bufLen) {
+static int sendFlowset(u_int16_t flowset_id, char *flowBuffer, u_int flowBufferLen, int *bufLen) {
   int len, pad;
   V9FlowSet flowSet;
 
-  if(readOnlyGlobals.disableIPv6 && (v4_flowset == 0)) return(0);
-
-  len = (v4_flowset ? readWriteGlobals->bufferLenV4 : readWriteGlobals->bufferLenV6);
+  len = readOnlyGlobals.templateBuffers[flowset_id].bufferLen;
 
   if(len == 0) return(0); /* No flows to send */
 
-  flowSet.templateId = htons(v4_flowset ? readOnlyGlobals.idTemplate : (readOnlyGlobals.idTemplate+1));
+  flowSet.templateId = htons(readOnlyGlobals.idTemplate + flowset_id);
   len += 4;
   pad = padding(len); len += pad;
   flowSet.flowsetLen = htons(len);
   memcpy(&flowBuffer[(*bufLen)], &flowSet, sizeof(flowSet));
   (*bufLen) += sizeof(flowSet);
 
-  if(((*bufLen)+(v4_flowset ? readWriteGlobals->bufferLenV4 : readWriteGlobals->bufferLenV6)) >= flowBufferLen) {
+  if(((*bufLen)+readOnlyGlobals.templateBuffers[flowset_id].bufferLen) >= flowBufferLen) {
     static u_char warning_sent = 0;
 
     if(!warning_sent) {
       traceEvent(TRACE_WARNING,
 		 "Internal error: too many NetFlow flows per packet (see -m) [%u/%u]",
-		 ((*bufLen)+(v4_flowset ? readWriteGlobals->bufferLenV4 : readWriteGlobals->bufferLenV6)),
+		 ((*bufLen)+readOnlyGlobals.templateBuffers[flowset_id].bufferLen),
 		 flowBufferLen);
       warning_sent = 1;
     }
 
-    if(v4_flowset)
-      readWriteGlobals->bufferLenV4 = flowBufferLen-(*bufLen)-1;
-    else
-      readWriteGlobals->bufferLenV6 = flowBufferLen-(*bufLen)-1;
+    readOnlyGlobals.templateBuffers[flowset_id].bufferLen = flowBufferLen-(*bufLen)-1;
   }
 
-  if(v4_flowset) {
-    memcpy(&flowBuffer[(*bufLen)], readWriteGlobals->bufferV4, readWriteGlobals->bufferLenV4);
-    (*bufLen) += readWriteGlobals->bufferLenV4;
-  } else {
-    memcpy(&flowBuffer[(*bufLen)], readWriteGlobals->bufferV6, readWriteGlobals->bufferLenV6);
-    (*bufLen) += readWriteGlobals->bufferLenV6;
-  }
-
+  memcpy(&flowBuffer[(*bufLen)], readOnlyGlobals.templateBuffers[flowset_id].buffer, readOnlyGlobals.templateBuffers[flowset_id].bufferLen);
+  (*bufLen) += readOnlyGlobals.templateBuffers[flowset_id].bufferLen;
   (*bufLen) += pad;
 
   return(1);
@@ -952,18 +1259,10 @@ static int sendFlowset(u_int8_t v4_flowset, char *flowBuffer, u_int flowBufferLe
 void sendNetFlowV9V10(u_char lastFlow,
 		      u_char sendTemplate,
 		      u_char sendOnlyTheTemplate) {
-  char flowBuffer[1514 /* Ethernet MTU */ - 42 /* Ethernet+IP+UDP header */] = { 0 };
-  int bufLen = 0, len, pad, num_extra_elems = 0;
+  char flowBuffer[JUMBO_MTU] = { 0 };
+  int bufLen = 0, /* len, */ num_extra_elems = 0, i;
 
-  /* NOTE: flow_sequence will be filled by sendFlowData */
-  if(readOnlyGlobals.netFlowVersion == 9) {
-    memcpy(&flowBuffer[bufLen], &readWriteGlobals->theV9Header, sizeof(readWriteGlobals->theV9Header));
-    bufLen += sizeof(readWriteGlobals->theV9Header);
-  } else {
-    /* IPFIX */
-    memcpy(&flowBuffer[bufLen], &readWriteGlobals->theIPFIXHeader, sizeof(readWriteGlobals->theIPFIXHeader));
-    bufLen += sizeof(readWriteGlobals->theIPFIXHeader);
-  }
+  /* traceEvent(TRACE_WARNING, "****** Sending templates... %d [%d]", sendTemplate, sendOnlyTheTemplate); */
 
   /*
     NOTE:
@@ -979,152 +1278,502 @@ void sendNetFlowV9V10(u_char lastFlow,
     V9TemplateDef templateDef;
     V9OptionTemplate optionTemplateDef;
     char tmpBuffer[256];
-    uint flowBufBegin, flowBufMax;
-    int numElements, optionTemplateId = readOnlyGlobals.idTemplate+2;
+    u_int flowBufBegin, flowBufMax, i, maxTemplatePktLen = 1200, beginIdx = 0, endIdx = 0, numTemplatesSent = 0;
+    int numElements, optionTemplateId = readOnlyGlobals.idTemplate + readOnlyGlobals.numActiveTemplates;
     V9FlowSet optionsFlowSet;
 
-    /* Header */
-    num_extra_elems++;
-    templateHeader.templateFlowset = (readOnlyGlobals.netFlowVersion == 9) ? htons(0) : htons(2);
-    len = sizeof(V9TemplateHeader)+sizeof(V9TemplateDef) + readOnlyGlobals.templateBufBeginV4;
+    while(numTemplatesSent < readOnlyGlobals.numActiveTemplates) {
+      u_int16_t len;
+      int pad;
 
-    if(!readOnlyGlobals.disableIPv6)
-      len += sizeof(V9TemplateDef) + readOnlyGlobals.templateBufBeginV6;
+      bufLen = 0, num_extra_elems = 0;
 
-    pad = padding(len); len += pad;
-    templateHeader.flowsetLen = htons(len);
-    memcpy(&flowBuffer[bufLen], &templateHeader, sizeof(V9TemplateHeader)); bufLen += sizeof(V9TemplateHeader);
-
-    /* IPv4 */
-    templateDef.fieldCount = htons(readOnlyGlobals.numTemplateFieldElementsV4);
-    templateDef.templateId = htons(readOnlyGlobals.idTemplate);
-    memcpy(&flowBuffer[bufLen], &templateDef, sizeof(V9TemplateDef)); bufLen += sizeof(V9TemplateDef);
-    memcpy(&flowBuffer[bufLen], readOnlyGlobals.templateBufferV4, readOnlyGlobals.templateBufBeginV4);
-    bufLen += readOnlyGlobals.templateBufBeginV4;
-
-    /* IPv6 */
-    if(!readOnlyGlobals.disableIPv6) {
-      templateDef.fieldCount = htons(readOnlyGlobals.numTemplateFieldElementsV6);
-      templateDef.templateId = htons(readOnlyGlobals.idTemplate+1);
-      memcpy(&flowBuffer[bufLen], &templateDef, sizeof(V9TemplateDef)); bufLen += sizeof(V9TemplateDef);
-      memcpy(&flowBuffer[bufLen], readOnlyGlobals.templateBufferV6, readOnlyGlobals.templateBufBeginV6);
-      bufLen += readOnlyGlobals.templateBufBeginV6;
-    }
-
-    bufLen += pad; /* Add padding */
-
-    /*
-      Here is the relevant paragraph from rfc 5101 "3.4.2.1.  Scope".
-
-      The scope is an Information Element specified in the IPFIX
-      Information Model [RFC5102].  An IPFIX-compliant implementation of
-      the Collecting Process SHOULD support this minimum set of Information
-      Elements as scope: LineCardId, TemplateId, exporterIPv4Address,
-      exporterIPv6Address, and ingressInterface.  Note that other
-      Information Elements, such as meteringProcessId, exportingProcessId,
-      observationDomainId, etc. are also valid scopes.  The IPFIX protocol
-      doesn't prevent the use of any Information Elements for scope.
-      However, some Information Element types don't make sense if specified
-      as scope; for example, the counter Information Elements.
-
-      Finally, note that the Scope Field Count MUST NOT be zero.
-
-      The main things to note.
-      1) supporting scope is a SHOULD not a MUST so not implementing it may be OK
-      2) Counters (and I would argue totals) don't make sense as scope
-      3) if you send an options template there MUST be at least one scope field
-
-      Interim solution: we forget scope with IPFIX leaving it to a future nProbe release
-    */
-
-    if(readOnlyGlobals.netFlowVersion == 9) {
-      /* Options Template */
-      num_extra_elems++;
-      optionTemplateDef.templateFlowset = (readOnlyGlobals.netFlowVersion == 9) ? htons(1) : htons(3);
-      len = sizeof(V9OptionTemplate)+readOnlyGlobals.optionTemplateBufBegin+4;
-      pad = padding(len); len += pad;
-      optionTemplateDef.flowsetLen     = htons(len);
-      optionTemplateDef.templateId     = htons(optionTemplateId);
+      /* NOTE: flow_sequence will be filled by sendFlowData */
       if(readOnlyGlobals.netFlowVersion == 9) {
-	optionTemplateDef.optionScopeLen = htons(4 /* SystemId=2 + SystemLen=2 */);
-	optionTemplateDef.optionLen      = htons(4 /* each field is 4 bytes */
-						 * (readOnlyGlobals.numOptionTemplateFieldElements));
+	memcpy(&flowBuffer[bufLen], &readWriteGlobals->theV9Header, sizeof(readWriteGlobals->theV9Header));
+	bufLen += sizeof(readWriteGlobals->theV9Header);
       } else {
-	optionTemplateDef.optionScopeLen = htons(2 /* SystemId + SystemLen */);
-	optionTemplateDef.optionLen      = htons(readOnlyGlobals.numOptionTemplateFieldElements);
+	/* IPFIX */
+	memcpy(&flowBuffer[bufLen], &readWriteGlobals->theIPFIXHeader, sizeof(readWriteGlobals->theIPFIXHeader));
+	bufLen += sizeof(readWriteGlobals->theIPFIXHeader);
       }
 
-      memcpy(&flowBuffer[bufLen], &optionTemplateDef, sizeof(V9OptionTemplate));
-      bufLen += sizeof(V9OptionTemplate);
-
-      {
-	u_int16_t vals[2] = { htons(1) /* Line Card */, htons(4) /* length = 2 bytes */};
-
-	memcpy(&flowBuffer[bufLen], vals, sizeof(vals));
-	bufLen += sizeof(vals);
-      }
-
-      memcpy(&flowBuffer[bufLen], readOnlyGlobals.optionTemplateBuffer,
-	     readOnlyGlobals.optionTemplateBufBegin);
-      bufLen += readOnlyGlobals.optionTemplateBufBegin;
-      bufLen += pad;
-
-      /* Options DataRecord */
+      /* Header */
       num_extra_elems++;
-      flowBufBegin = 0, flowBufMax = sizeof(tmpBuffer);
-      flowPrintf(readOnlyGlobals.v9OptionTemplateElementList,
-		 1 /* IPv4 */, tmpBuffer, &flowBufBegin, &flowBufMax,
-		 &numElements, 0, NULL, 0, 0, 1);
+      templateHeader.templateFlowset = (readOnlyGlobals.netFlowVersion == 9) ? htons(0) : htons(2); /* CHECK: is 2 is valid all the time ? */
+      len = sizeof(V9TemplateHeader);
 
-      len = 4 /* sizeof(systemId) */ + flowBufBegin+sizeof(optionsFlowSet);
-      pad = padding(len); len += pad;
-      optionsFlowSet.templateId = htons(optionTemplateId);
-      optionsFlowSet.flowsetLen = htons(len);
+      for(i=beginIdx; i<readOnlyGlobals.numActiveTemplates; i++) {
+	u_int to_add;
 
-      memcpy(&flowBuffer[bufLen], &optionsFlowSet, sizeof(optionsFlowSet));
-      bufLen += sizeof(optionsFlowSet);
+	to_add = sizeof(V9TemplateDef) + readOnlyGlobals.templateBuffers[i].templateBufBegin;
 
-      {
-	u_int32_t system_ip = 0x0;
+	if((len + to_add) > maxTemplatePktLen)
+	  break;
 
-	memcpy(&flowBuffer[bufLen], &system_ip, flowBufBegin);
-	bufLen += sizeof(system_ip);
+	len += to_add;
+	endIdx = i, numTemplatesSent++;
       }
 
-      memcpy(&flowBuffer[bufLen], tmpBuffer, flowBufBegin);
-      bufLen += flowBufBegin;
-      bufLen += pad;
-    }
+      pad = padding(len); len += pad;
+      templateHeader.flowsetLen = htons(len);
+      memcpy(&flowBuffer[bufLen], &templateHeader, sizeof(V9TemplateHeader)); bufLen += sizeof(V9TemplateHeader);
+
+      /* Dump templates */
+      for(i=beginIdx; i <= endIdx; i++) {
+	templateDef.fieldCount = htons(readOnlyGlobals.templateBuffers[i].numTemplateFieldElements);
+	templateDef.templateId = htons(readOnlyGlobals.idTemplate+i);
+	memcpy(&flowBuffer[bufLen], &templateDef, sizeof(V9TemplateDef));
+	bufLen += sizeof(V9TemplateDef);
+	memcpy(&flowBuffer[bufLen], readOnlyGlobals.templateBuffers[i].templateBuffer,
+	       readOnlyGlobals.templateBuffers[i].templateBufBegin);
+	bufLen += readOnlyGlobals.templateBuffers[i].templateBufBegin;
+      }
+
+      bufLen += pad; /* Add padding */
+
+      /*
+	Here is the relevant paragraph from rfc 5101 "3.4.2.1.  Scope".
+
+	The scope is an Information Element specified in the IPFIX
+	Information Model [RFC5102].  An IPFIX-compliant implementation of
+	the Collecting Process SHOULD support this minimum set of Information
+	Elements as scope: LineCardId, TemplateId, exporterIPv4Address,
+	exporterIPv6Address, and ingressInterface.  Note that other
+	Information Elements, such as meteringProcessId, exportingProcessId,
+	observationDomainId, etc. are also valid scopes.  The IPFIX protocol
+	doesn't prevent the use of any Information Elements for scope.
+	However, some Information Element types don't make sense if specified
+	as scope; for example, the counter Information Elements.
+
+	Finally, note that the Scope Field Count MUST NOT be zero.
+
+	The main things to note.
+	1) supporting scope is a SHOULD not a MUST so not implementing it may be OK
+	2) Counters (and I would argue totals) don't make sense as scope
+	3) if you send an options template there MUST be at least one scope field
+
+	Interim solution: we forget scope with IPFIX leaving it to a future nProbe release
+      */
+
+      if(numTemplatesSent == readOnlyGlobals.numActiveTemplates) {
+	/* We send the scope only when we're done with templates */
+
+	if(readOnlyGlobals.netFlowVersion == 9) {
+	  u_int16_t vals[2] = { htons(1) /* Line Card */, htons(4) /* length = 2 bytes */};
+	  u_int32_t system_ip = 0x0;
+
+	  /* Options Template */
+	  num_extra_elems++;
+	  optionTemplateDef.templateFlowset = (readOnlyGlobals.netFlowVersion == 9) ? htons(1) : htons(3);
+	  len = sizeof(V9OptionTemplate)+readOnlyGlobals.optionTemplateBufBegin+4;
+	  pad = padding(len); len += pad;
+	  optionTemplateDef.flowsetLen     = htons(len);
+	  optionTemplateDef.templateId     = htons(optionTemplateId);
+	  if(readOnlyGlobals.netFlowVersion == 9) {
+	    optionTemplateDef.optionScopeLen = htons(4 /* SystemId=2 + SystemLen=2 */);
+	    optionTemplateDef.optionLen      = htons(4 /* each field is 4 bytes */
+						     * (readOnlyGlobals.numOptionTemplateFieldElements));
+	  } else {
+	    optionTemplateDef.optionScopeLen = htons(2 /* SystemId + SystemLen */);
+	    optionTemplateDef.optionLen      = htons(readOnlyGlobals.numOptionTemplateFieldElements);
+	  }
+
+	  memcpy(&flowBuffer[bufLen], &optionTemplateDef, sizeof(V9OptionTemplate));
+	  bufLen += sizeof(V9OptionTemplate);
+
+	  /* Options */
+	  memcpy(&flowBuffer[bufLen], vals, sizeof(vals));
+	  bufLen += sizeof(vals);
+
+	  memcpy(&flowBuffer[bufLen], readOnlyGlobals.optionTemplateBuffer,
+		 readOnlyGlobals.optionTemplateBufBegin);
+	  bufLen += readOnlyGlobals.optionTemplateBufBegin;
+	  bufLen += pad;
+
+	  /* Options DataRecord */
+	  num_extra_elems++;
+	  flowBufBegin = 0, flowBufMax = sizeof(tmpBuffer);
+	  flowPrintf(readOnlyGlobals.v9OptionTemplateElementList, NULL,
+		     1 /* IPv4 */, tmpBuffer, &flowBufBegin, &flowBufMax,
+		     &numElements, 0, NULL, 0, 0, 1, 0 /* No JSON */);
+
+	  len = 4 /* sizeof(systemId) */ + flowBufBegin+sizeof(optionsFlowSet);
+	  pad = padding(len); len += pad;
+	  optionsFlowSet.templateId = htons(optionTemplateId);
+	  optionsFlowSet.flowsetLen = htons(len);
+
+	  memcpy(&flowBuffer[bufLen], &optionsFlowSet, sizeof(optionsFlowSet));
+	  bufLen += sizeof(optionsFlowSet);
+
+	  /* System IP */
+	  memcpy(&flowBuffer[bufLen], &system_ip, flowBufBegin);
+	  bufLen += sizeof(system_ip);
+
+	  memcpy(&flowBuffer[bufLen], tmpBuffer, flowBufBegin);
+	  bufLen += flowBufBegin;
+	  bufLen += pad;
+	} /* Scope */
+      }
+
+      /* Fill in the flow length */
+      switch(readOnlyGlobals.netFlowVersion) {
+      case 9:
+	len = htons(num_extra_elems);
+	memcpy(&flowBuffer[2], &len, 2);
+	break;
+
+      case 10:
+	len = htons(bufLen);
+	memcpy(&flowBuffer[2], &len, 2);
+      	break;
+      }
+
+#ifdef DEBUG
+      traceEvent(TRACE_ERROR, "--->>> Sending %u bytes template packet", bufLen);
+#endif
+
+      sendNetFlow(&flowBuffer, bufLen, 0, 1, 1);
+      beginIdx = endIdx+1;
+    } /* while */
   }
 
   if(!sendOnlyTheTemplate) {
-    u_int num = 0;
+    u_int num, beginIdx, numTemplateFlowsSent = 0;
 
-    num += sendFlowset(1, flowBuffer, sizeof(flowBuffer), &bufLen); /* Send IPv4 flows */
-    num += sendFlowset(0, flowBuffer, sizeof(flowBuffer), &bufLen); /* Send IPv6 flows */
+    while(numTemplateFlowsSent < readOnlyGlobals.numActiveTemplates) {
+      bufLen = 0, num_extra_elems = 0, num = 0, beginIdx = 0;
 
-    /* Fill in the flow length */
-    if(readOnlyGlobals.netFlowVersion == 9) {
-      u_int16_t len = htons(num+num_extra_elems);
+      /* NOTE: flow_sequence will be filled by sendFlowData */
+      if(readOnlyGlobals.netFlowVersion == 9) {
+	memcpy(&flowBuffer[bufLen], &readWriteGlobals->theV9Header,
+	       sizeof(readWriteGlobals->theV9Header));
+	bufLen += sizeof(readWriteGlobals->theV9Header);
+      } else {
+	/* IPFIX */
+	memcpy(&flowBuffer[bufLen], &readWriteGlobals->theIPFIXHeader,
+	       sizeof(readWriteGlobals->theIPFIXHeader));
+	bufLen += sizeof(readWriteGlobals->theIPFIXHeader);
+      }
 
-      memcpy(&flowBuffer[2], &len, 2);
-    } else if(readOnlyGlobals.netFlowVersion == 10) {
-      u_int16_t len = htons(bufLen);
+      /* Send all buffered data */
+      for(i=beginIdx; i<readOnlyGlobals.numActiveTemplates; i++) {
+	int n;
 
-      memcpy(&flowBuffer[2], &len, 2);
-    }
+	n = sendFlowset(i, flowBuffer, sizeof(flowBuffer), &bufLen);
+	num += n;
 
-    sendNetFlow(flowBuffer, bufLen, 0, 1, 0);
-  } else {
-    if(readOnlyGlobals.netFlowVersion == 10) {
+#ifdef DEBUG
+	if(n > 0)
+	  traceEvent(TRACE_ERROR, "--->>> Sending flowset %u/%u [id=%d][len=%u][bufLen=%u][num=%u]",
+		     i, readOnlyGlobals.numActiveTemplates,
+		     readOnlyGlobals.idTemplate + i, n, bufLen, num);
+#endif
+
+	numTemplateFlowsSent++;
+
+	if(bufLen > readOnlyGlobals.maxNetFlowPacketPayloadLen /* bytes */)
+	  break;
+      }
+
       /* Fill in the flow length */
-      u_int16_t len = htons(bufLen);
+      if(readOnlyGlobals.netFlowVersion == 9) {
+	u_int16_t len = htons(num+num_extra_elems);
 
-      memcpy(&flowBuffer[2], &len, 2);
-    }
+	memcpy(&flowBuffer[2], &len, 2);
+      } else if(readOnlyGlobals.netFlowVersion == 10) {
+	u_int16_t len = htons(bufLen);
 
-    sendNetFlow(&flowBuffer, bufLen, 0, 1, 1);
+	memcpy(&flowBuffer[2], &len, 2);
+      }
+
+      sendNetFlow(flowBuffer, bufLen, 0, 1, 0);
+
+#ifdef DEBUG
+      traceEvent(TRACE_ERROR, "--->>> Sending %u bytes flow packet", bufLen);
+#endif
+
+      beginIdx = numTemplateFlowsSent+1;
+    } /* while */
   }
 
-  readWriteGlobals->bufferLenV4 = readWriteGlobals->bufferLenV6 = 0;
+  for(i=0; i<readOnlyGlobals.numActiveTemplates; i++)
+    readOnlyGlobals.templateBuffers[i].bufferLen = 0;
 }
+
+/* ****************************************************** */
+
+static void id2user(FlowHashBucket *bkt, char *keyname) {
+  if(!bkt->core.user.user_searched) {
+    char *user, key[64];
+
+    snprintf(key, sizeof(key), "username.%s", keyname);
+    user = find_lru_cache_str(&readWriteGlobals->flowUsersCache, key);
+
+    if(user != NULL) {
+      if(user[0] != '\0') {
+	bkt->core.user.username = strdup(user);
+      } else {
+	/* The cache said that we have no result yet (string is "") */
+      }
+
+      bkt->core.user.user_searched = 1;
+      return;
+    }
+
+    user = getHashCacheDataStrKey("", bkt->core.tuple.flow_hash % MAX_NUM_REDIS_CONNECTIONS,
+				  keyname, "username");
+
+    if(user != NULL) {
+      bkt->core.user.username = user;
+      add_to_lru_cache_str_timeout(&readWriteGlobals->flowUsersCache, key, user, 60 /* (sec) Positive expire time */);
+    } else {
+      add_to_lru_cache_str_timeout(&readWriteGlobals->flowUsersCache, key, "", 5 /* (sec) Negative expire time */);
+    }
+
+    bkt->core.user.user_searched = 1;
+  }
+}
+
+/* ****************************************************** */
+
+void setServerName(FlowHashBucket *bkt, char *name) {
+  if((name != NULL) && (bkt->core.server.name == NULL)) {
+    if(bkt->core.server.name) free(bkt->core.server.name);
+    bkt->core.server.name = strdup(name), bkt->core.server.server_searched = 1;
+  }
+}
+
+/* ****************************************************** */
+
+void mapServerName(FlowHashBucket *bkt) {
+  if(!bkt->core.server.server_searched) {
+    char *server_ip, buf[128];
+
+    server_ip = _intoa((bkt->core.tuple.key.k.ipKey.sport > bkt->core.tuple.key.k.ipKey.dport) ?
+		       bkt->core.tuple.key.k.ipKey.dst : bkt->core.tuple.key.k.ipKey.src,
+		       buf, sizeof(buf));
+
+    bkt->core.server.name = getCacheDataStrKey("dns.cache.", 0, server_ip);
+    bkt->core.server.server_searched = 1;
+  }
+}
+
+/* ****************************************************** */
+
+void teid2user(FlowHashBucket *bkt, u_int32_t teid) {
+  if(!bkt->core.user.user_searched) {
+    char *user, key[64];
+
+    snprintf(key, sizeof(key), "teid.%u", teid);
+    user = find_lru_cache_str(&readWriteGlobals->flowUsersCache, key);
+
+    if(user != NULL) {
+      if(user[0] != '\0') {
+	bkt->core.user.username = strdup(user);
+	bkt->core.user.user_searched = 1;
+      } else {
+	/* The cache said that we have no result yet (string is "") */
+      }
+
+      return;
+    }
+
+    user = getCacheDataNumKey("teid.", 0, teid);
+
+    if(user != NULL) {
+      bkt->core.user.username = user;
+      add_to_lru_cache_str_timeout(&readWriteGlobals->flowUsersCache, key, user, 60 /* (sec) Positive expire time */);
+    } else
+      add_to_lru_cache_str_timeout(&readWriteGlobals->flowUsersCache, key, "", 5 /* (sec) Negative expire time */);
+
+    bkt->core.user.user_searched = 1;
+  }
+}
+
+/* ****************************************************** */
+
+static void ip2user(FlowHashBucket *bkt, u_int32_t ipv4, char *keybuf, u_int keybuf_len) {
+  char ipbuf[24];
+
+  snprintf(keybuf, keybuf_len, "%s", _intoaV4(ipv4, ipbuf, sizeof(ipbuf)));
+  id2user(bkt, keybuf);
+}
+
+/* *********************************************** */
+
+static void accoutTrafficPerIMSI(FlowHashBucket *bkt) {
+  char/* buf[128], */ key[64], *semicolumn;
+  u_int32_t client_ip, id;
+  u_int32_t bytes_up, bytes_down;
+
+  if((!readOnlyGlobals.aggregateTrafficPerIMSI)
+     || (bkt->core.user.username == NULL))
+    return;
+
+  semicolumn = strrchr(bkt->core.user.username, ';');
+  if(!semicolumn) {
+    traceEvent(TRACE_WARNING, "Invalid IMSI format (%s)", bkt->core.user.username);
+    return;
+  } else
+    client_ip = atol(&semicolumn[1]);
+
+  /*
+    IMSI/NSAPI/LAC/CCI/CSAC/IPv4
+    123460000026315;5;0;0;0;123456789
+  */
+  snprintf(key, sizeof(key), "gtp.%s", bkt->core.user.username);
+  if(strlen(key) > 14) {
+    semicolumn = strchr(&key[14], ';');
+    semicolumn = strchr(&semicolumn[1], ';');
+    semicolumn[0] = '\0';
+  }
+
+  //traceEvent(TRACE_NORMAL, "==> %s", bkt->core.user.username ? bkt->core.user.username : "???");
+
+  if(bkt->core.tuple.key.k.ipKey.src.ipType.ipv4 == client_ip)
+    bytes_up = bkt->core.tuple.flowCounters.bytesSent, bytes_down = bkt->core.tuple.flowCounters.bytesRcvd;
+  else
+    bytes_up = bkt->core.tuple.flowCounters.bytesRcvd, bytes_down = bkt->core.tuple.flowCounters.bytesSent;
+
+  id = bytes_up % MAX_NUM_REDIS_CONNECTIONS;
+  incrHashCacheKeyValueNumber(key, id, "bytes.up", bytes_up);
+  incrHashCacheKeyValueNumber(key, id, "bytes.down", bytes_down);
+
+  if(bkt->ext && (bkt->core.tuple.key.k.ipKey.proto == IPPROTO_TCP)) {
+    u_int32_t retr_up, retr_down, retr;
+
+    if(bkt->core.tuple.key.k.ipKey.src.ipType.ipv4 == client_ip)
+      retr_up  = bkt->ext->protoCounters.tcp.bytesSentRetransmitted, retr_down = bkt->ext->protoCounters.tcp.bytesRcvdRetransmitted;
+    else
+      retr_up  = bkt->ext->protoCounters.tcp.bytesRcvdRetransmitted, retr_down = bkt->ext->protoCounters.tcp.bytesSentRetransmitted;
+
+    incrHashCacheKeyValueNumber(key, id, "bytes.tcp_noretr_up", bytes_up-retr_up);
+    incrHashCacheKeyValueNumber(key, id, "bytes.tcp_noretr_down", bytes_down-retr_down);
+    incrHashCacheKeyValueNumber(key, id, "pkts.tcp",  bkt->core.tuple.flowCounters.pktSent+bkt->core.tuple.flowCounters.pktRcvd);
+
+    if((retr = bkt->ext->protoCounters.tcp.pktRcvdRetransmitted + bkt->ext->protoCounters.tcp.pktSentRetransmitted) > 0)
+      incrHashCacheKeyValueNumber(key, id, "pkts.retr_tcp", retr);    
+  }
+}
+
+/* *********************************************** */
+
+void mapTrafficToUser(FlowHashBucket *bkt) {
+  if(bkt->core.user.user_searched) return;
+
+  /* 1 - Search tunnels (if any) */
+  if(bkt->ext != NULL) {
+    if(bkt->ext->src2dst_tunnel_id != 0) {
+      teid2user(bkt, bkt->ext->src2dst_tunnel_id);
+      if(bkt->core.user.user_searched /* Found */) {
+	accoutTrafficPerIMSI(bkt);
+	return;
+      }
+    }
+
+    if(bkt->ext->dst2src_tunnel_id != 0) {
+      teid2user(bkt, bkt->ext->dst2src_tunnel_id);
+      if(bkt->core.user.user_searched /* Found */) {
+	accoutTrafficPerIMSI(bkt);
+	return;
+      }
+    }
+  }
+
+  if(readOnlyGlobals.enableRadiusPlugin
+     || readOnlyGlobals.enableDiameterPlugin) {
+    /* 2 - Search IPs */
+    if(bkt->core.tuple.key.k.ipKey.src.ipVersion == 4) {
+      /* We search only IPv4 */
+      char buf[32];
+
+      /* Try with the client first */
+      if(bkt->core.tuple.key.k.ipKey.sport < bkt->core.tuple.key.k.ipKey.dport) {
+	ip2user(bkt, bkt->core.tuple.key.k.ipKey.src.ipType.ipv4, buf, sizeof(buf));
+	if(bkt->core.user.user_searched /* Found */) return;
+	ip2user(bkt, bkt->core.tuple.key.k.ipKey.dst.ipType.ipv4, buf, sizeof(buf));
+      } else {
+	ip2user(bkt, bkt->core.tuple.key.k.ipKey.dst.ipType.ipv4, buf, sizeof(buf));
+	if(bkt->core.user.user_searched /* Found */) return;
+	ip2user(bkt, bkt->core.tuple.key.k.ipKey.src.ipType.ipv4, buf, sizeof(buf));
+      }
+    }
+  }
+}
+
+/* **************************************************** */
+
+int set_tcp_client_address(char *host_and_port, struct sockaddr_in *servaddr) {
+  char buf[256], *host, *port;
+  struct hostent *server;
+
+  snprintf(buf, sizeof(buf), "%s", host_and_port);
+  host = strtok(buf, ":");
+  if(!host) return(-1);
+
+  port = strtok(NULL, ":");
+  if(!port) return(-2);
+
+  if(!(server = gethostbyname(host)))
+    return(-3);
+
+  memset(servaddr, 0, sizeof(struct sockaddr_in));
+  servaddr->sin_family = AF_INET;
+  servaddr->sin_addr.s_addr = (*(struct in_addr *)server->h_addr_list[0]).s_addr;
+  servaddr->sin_port = htons(atoi(port));
+
+  return(0);
+}
+
+/* **************************************************** */
+
+void close_socket(int sock) {
+  if(sock != -1) {
+#ifndef WIN32
+    shutdown(sock, SHUT_RDWR);
+#endif
+    close(sock);
+  }
+}
+
+/* **************************************************** */
+
+int connect_to_server(struct sockaddr *servaddr) {
+  int tcp_socket = socket(AF_INET, SOCK_STREAM, 0);
+  int set = 1;
+
+  if(tcp_socket == -1) {
+    printf("Unable to create a socket [%s/%u]\n", strerror(errno), errno);
+    return(-1);
+  }
+
+#ifndef linux
+#ifndef WIN32
+  setsockopt(tcp_socket, SOL_SOCKET, SO_NOSIGPIPE, (void *)&set, sizeof(int));
+#endif
+#endif
+  setsockopt(tcp_socket, SOL_SOCKET, SO_REUSEADDR, (void *)&set, sizeof(int));
+
+  if(connect(tcp_socket, servaddr, sizeof(struct sockaddr)) != 0) {
+    close_socket(tcp_socket);
+    return(-1);
+  }
+
+  return(tcp_socket);
+}
+
+/* **************************************************** */
+
+int send_tcp(int sock, char *msg, u_int msg_len) {
+  int flags = 0;
+
+#ifdef linux
+  flags = MSG_NOSIGNAL;
+#endif
+
+  return(send(sock, msg, msg_len, flags));
+}
+
+/* **************************************************** */
+

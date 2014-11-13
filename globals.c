@@ -1,7 +1,7 @@
 /* 
  *        nProbe - a Netflow v5/v9/IPFIX probe for IPv4/v6 
  *
- *       Copyright (C) 2002-11 Luca Deri <deri@ntop.org> 
+ *       Copyright (C) 2002-14 Luca Deri <deri@ntop.org> 
  *
  *                     http://www.ntop.org/ 
  * 
@@ -25,5 +25,4 @@
 ReadOnlyGlobals  readOnlyGlobals;
 ReadWriteGlobals *readWriteGlobals;
 
-u_int8_t nprobe_up = 0, dequeueBucketToExport_up = 0;
 char nprobe_revision[] = NPROBE_REVISION;

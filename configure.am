@@ -7,7 +7,7 @@ dnl>
 dnl> standard Autoconf prolog
 dnl>
 dnl> nprobe version <major version>.<minor version>.<build date>
-AC_INIT([nprobe],[7.0.140924])
+@AC_INIT@
 AC_PREREQ(2.52)
 AC_REVISION([1.0])
 
@@ -30,7 +30,6 @@ fi
 
 LINUX_OS_RELEASE=`lsb_release -r | cut -f 2|cut -d '.' -f 1`
 
-N2DISK_PACKAGE_VERSION=`cat ./private/n2disk_version.h.in | grep N2DISK_VERSION | head -1 | cut -d \" -f 2|sed "s/@TODAY@/$TODAY/g"`
 
 PFRING_SVN_RELEASE=""
 if test -d $HOME/PF_RING; then
@@ -133,7 +132,7 @@ DEFS="-DHAVE_CONFIG_H"
 dnl> CFLAGS="-g $CFLAGS"
 HERE=`pwd`
 
-AC_DEFINE(HAVE_NOW, 1411584884, [Time we compiled nprobe])
+AC_DEFINE(HAVE_NOW, @NOW@, [Time we compiled nprobe])
 
 dnl Test endianness
 AC_C_BIGENDIAN([ AC_DEFINE(NPROBE_BIG_ENDIAN, 1, [build for big endian]) ]
@@ -837,7 +836,7 @@ else
    AC_MSG_RESULT([32])
 fi
 
-PLUGINS=plugins
+PLUGINS=
 AC_DEFINE_UNQUOTED(ENABLE_PLUGINS, 1, [ Enable plugin support ])
 
 CFLAGS=`echo ${CFLAGS}|sed "s/-g//g"`
@@ -896,18 +895,16 @@ AC_CONFIG_FILES([utils/Makefile])
 AC_CONFIG_FILES([packages/nprobe.spec])
 AC_CONFIG_FILES([packages/n2disk.spec])
 AC_CONFIG_FILES([packages/n2disknt.spec])
-AC_CONFIG_FILES([private/n2disk_version.h])
 
 dnl> Use plugins/Makefile if you enable plugins
 if test -d "./plugins"; then
-    AC_CONFIG_FILES([plugins/Makefile])
+    echo ""
 fi
 
 dnl> Create private/ Makefile if available
 if test -d  "./private" ; then
    # echo below needed to avoid failing if private/ is missing
    echo ""
-    AC_CONFIG_FILES([private/Makefile])
 fi
 
 AC_OUTPUT()
@@ -928,7 +925,7 @@ echo "creating version.c"
 /bin/rm -f version.c
 echo $PACKAGE_VERSION | sed -e 's/.*/char * version   = "&";/' > version.c
 ./config.guess | sed -e 's/.*/char * osName    = "&";/' >> version.c
-echo "unsigned int compile_time = 1411584884;" >> version.c
+echo "unsigned int compile_time = @NOW@;" >> version.c
 echo "unsigned int svn_release = $SVN_RELEASE;" >> version.c
 
 echo "creating version.h"
