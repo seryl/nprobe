@@ -1,0 +1,78 @@
+Summary: Packet-to-disk application with Napatech support
+Name: n2disknt
+Version: @N2DISK_PACKAGE_VERSION@
+Release: %{buildnumber}
+License: Proprietary
+Group: Networking/Utilities
+URL: http://www.ntop.org/
+Source: n2disknt-%{version}.tgz
+Packager: Luca Deri <deri@ntop.org>
+# Temporary location where the RPM will be built
+BuildRoot:  %{_tmppath}/%{name}-%{version}-root
+Requires: pfring = @PFRING_VERSION@-@PFRING_SVN_RELEASE@ numactl
+
+%description
+Packet-to-disk application.
+
+%prep
+
+%setup -q
+
+%build
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+if [ -x ./configure ]; then
+  CFLAGS="$RPM_OPT_FLAGS" ./configure
+else
+  CFLAGS="$RPM_OPT_FLAGS" ./autogen.sh
+fi
+cd private/license; make
+cd ..
+make n2disknt
+cd ..
+#
+
+# Installation may be a matter of running an install make target or you
+# may need to manually install files with the install command.
+%install
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+if [ -d $RPM_BUILD_ROOT ]; then
+	\rm -rf $RPM_BUILD_ROOT
+fi
+# Napatech
+mkdir -p $RPM_BUILD_ROOT/opt/napatech3/lib/
+mkdir -p $RPM_BUILD_ROOT/usr/local/bin/
+cp private/n2disknt $RPM_BUILD_ROOT/usr/local/bin
+cp private/nttool $RPM_BUILD_ROOT/usr/local/bin
+######
+cp private/n2disknt $HOME/Napatech
+cp private/nttool $HOME/Napatech
+######
+cp /opt/napatech3/lib/libntapi.so /opt/napatech3/lib/libntos.so $RPM_BUILD_ROOT/opt/napatech3/lib/
+#
+strip $RPM_BUILD_ROOT/usr/local/bin/*
+#
+DST=$RPM_BUILD_ROOT/usr/local/n2disk
+SRC=$RPM_BUILD_DIR/%{name}-%{version}
+mkdir -p $DST/conf
+# Clean out our build directory
+%clean
+rm -fr $RPM_BUILD_ROOT
+
+%files
+# Napatech
+/usr/local/bin/n2disknt
+/usr/local/bin/nttool
+/opt/napatech3/lib/libntapi.so
+/opt/napatech3/lib/libntos.so
+
+# Set the default attributes of all of the files specified to have an
+# owner and group of root and to inherit the permissions of the file
+# itself.
+%defattr(-, root, root)
+
+%changelog
+* Wed Feb 19 2014 Luca Deri <deri@ntop.org> 2.0
+- Current package version
+
+

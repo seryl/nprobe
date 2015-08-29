@@ -1,10 +1,10 @@
-/* 
- *        nProbe - a Netflow v5/v9/IPFIX probe for IPv4/v6 
+/*
+ *        nProbe - a Netflow v5/v9/IPFIX probe for IPv4/v6
  *
- *       Copyright (C) 2002-11 Luca Deri <deri@ntop.org> 
+ *       Copyright (C) 2002-14 Luca Deri <deri@ntop.org>
  *
- *                     http://www.ntop.org/ 
- * 
+ *                     http://www.ntop.org/
+ *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2 of the License, or
@@ -24,9 +24,14 @@
  *	http://www.winprog.org/tutorial/
  *	http://www.informit.com/articles/printerfriendly.asp?p=342886
  *	ftp://sources.redhat.com/pub/pthreads-win32/
+ *
+ *  Debugging:
+ * http://social.technet.microsoft.com/wiki/contents/articles/8103.application-crash-dump-analysis-windows-7.aspx
  */
 
 #include "nprobe.h"
+
+#include <intrin.h> /* __cpuid */
 
 /* ****************************************************** */
 
@@ -37,8 +42,8 @@
 #endif
 
 struct timezone {
-    int tz_minuteswest; /* minutes W of Greenwich */
-    int tz_dsttime;     /* type of dst correction */
+  int tz_minuteswest; /* minutes W of Greenwich */
+  int tz_dsttime;     /* type of dst correction */
 };
 
 #if 0
@@ -49,39 +54,41 @@ int gettimeofday(struct timeval *tv, void *notUsed) {
 }
 #endif
 
+#if 0
 int gettimeofday(struct timeval *tv, struct timezone *tz)
 {
-    FILETIME        ft;
-    LARGE_INTEGER   li;
-    __int64         t;
-    static int      tzflag;
+  FILETIME        ft;
+  LARGE_INTEGER   li;
+  __int64         t;
+  static int      tzflag;
 
-    if (tv)
+  if (tv)
     {
-        GetSystemTimeAsFileTime(&ft);
-        li.LowPart  = ft.dwLowDateTime;
-        li.HighPart = ft.dwHighDateTime;
-        t  = li.QuadPart;       /* In 100-nanosecond intervals */
-        t -= EPOCHFILETIME;     /* Offset to the Epoch time */
-        t /= 10;                /* In microseconds */
-        tv->tv_sec  = (long)(t / 1000000);
-        tv->tv_usec = (long)(t % 1000000);
+      GetSystemTimeAsFileTime(&ft);
+      li.LowPart  = ft.dwLowDateTime;
+      li.HighPart = ft.dwHighDateTime;
+      t  = li.QuadPart;       /* In 100-nanosecond intervals */
+      t -= EPOCHFILETIME;     /* Offset to the Epoch time */
+      t /= 10;                /* In microseconds */
+      tv->tv_sec  = (long)(t / 1000000);
+      tv->tv_usec = (long)(t % 1000000);
     }
 
-    if (tz)
+  if (tz)
     {
-        if (!tzflag)
+      if (!tzflag)
         {
-            _tzset();
-            tzflag++;
+	  _tzset();
+	  tzflag++;
         }
-        tz->tz_minuteswest = _timezone / 60;
-        tz->tz_dsttime = _daylight;
+      tz->tz_minuteswest = _timezone / 60;
+      tz->tz_dsttime = _daylight;
     }
 
-    return 0;
+  return 0;
 }
 
+#endif
 
 /* ****************************************************** */
 
@@ -98,38 +105,15 @@ inet_aton(const char *cp, struct in_addr *addr)
 
 /* ******************************************************* */
 
-
-/*http://msdn.microsoft.com/en-us/library/aa364993(VS.85).aspx */
- void printVolumeInfo() {
-	TCHAR volumeName[MAX_PATH + 1] = { 0 };
-	TCHAR fileSystemName[MAX_PATH + 1] = { 0 };
-	DWORD serialNumber = 0;
-	DWORD maxComponentLen = 0;
-	DWORD fileSystemFlags = 0;
-	if (GetVolumeInformation(
-			"C:\\",
-			volumeName,
-			ARRAYSIZE(volumeName),
-			&serialNumber,
-			&maxComponentLen,
-			&fileSystemFlags,
-			fileSystemName,
-			ARRAYSIZE(fileSystemName)))
-	{
-		printf("Volume Name: %s\n", volumeName);
-		printf("Serial Number: %lu\n", serialNumber);
-		printf("File System Name: %s\n", fileSystemName);
-		printf("Max Component Length: %lu\n", maxComponentLen);
-	}
-}
+#define WIN32_THREADS
 
 #ifdef WIN32_THREADS
 
 /* **************************************
 
-WIN32 MULTITHREAD STUFF
+   WIN32 MULTITHREAD STUFF
 
-************************************** */
+   ************************************** */
 
 pthread_t pthread_self(void) { return(0); }
 
@@ -158,9 +142,9 @@ void pthread_detach(pthread_t *threadId) {
 /* ************************************ */
 
 int pthread_join (pthread_t threadId, void **_value_ptr) {
-	int rc = WaitForSingleObject(threadId, INFINITE);
-	CloseHandle(threadId);
-	return(rc); 
+  int rc = WaitForSingleObject(threadId, INFINITE);
+  CloseHandle(threadId);
+  return(rc);
 }
 
 /* ************************************ */
@@ -181,8 +165,8 @@ void pthread_mutex_destroy(pthread_mutex_t *mutex) {
 
 int pthread_mutex_lock(pthread_mutex_t *mutex) {
 
-  if(*mutex == NULL) 
-		printf("Error\n");
+  if(*mutex == NULL)
+    printf("Error\n");
   WaitForSingleObject(*mutex, INFINITE);
   return(0);
 }
@@ -199,37 +183,78 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex) {
 /* ************************************ */
 
 int pthread_mutex_unlock(pthread_mutex_t *mutex) {
-   if(*mutex == NULL)
-		printf("Error\n");
-   return(!ReleaseMutex(*mutex));
+  if(*mutex == NULL)
+    printf("Error\n");
+  return(!ReleaseMutex(*mutex));
 }
 
 #endif
 
 #if 0
+
+/* https://svn.nmap.org/nmap/libdnet-stripped/src/strsep.c */
+/*
+ * Get next token from string *stringp, where tokens are possibly-empty
+ * strings separated by characters from delim.  
+ *
+ * Writes NULs into the string at *stringp to end tokens.
+ * delim need not remain constant from call to call.
+ * On return, *stringp points past the last NUL written (if there might
+ * be further tokens), or is NULL (if there are definitely no more tokens).
+ *
+ * If *stringp is NULL, strsep returns NULL.
+ */
+char* strsep(char **stringp, const char *delim)
+{
+	register char *s;
+	register const char *spanp;
+	register int c, sc;
+	char *tok;
+
+	if ((s = *stringp) == NULL)
+		return (NULL);
+	for (tok = s;;) {
+		c = *s++;
+		spanp = delim;
+		do {
+			if ((sc = *spanp++) == c) {
+				if (c == 0)
+					s = NULL;
+				else
+					s[-1] = 0;
+				*stringp = s;
+				return (tok);
+			}
+		} while (sc != 0);
+	}
+	/* NOTREACHED */
+}
+#endif
+
 /* Reentrant string tokenizer.  Generic version.
 
-Slightly modified from: glibc 2.1.3
+   Slightly modified from: glibc 2.1.3
 
-Copyright (C) 1991, 1996, 1997, 1998, 1999 Free Software Foundation, Inc.
-This file is part of the GNU C Library.
+   Copyright (C) 1991, 1996, 1997, 1998, 1999 Free Software Foundation, Inc.
+   This file is part of the GNU C Library.
 
-The GNU C Library is free software; you can redistribute it and/or
-modify it under the terms of the GNU Library General Public License as
-published by the Free Software Foundation; either version 2 of the
-License, or (at your option) any later version.
+   The GNU C Library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Library General Public License as
+   published by the Free Software Foundation; either version 2 of the
+   License, or (at your option) any later version.
 
-The GNU C Library is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-Library General Public License for more details.
+   The GNU C Library is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
 
-You should have received a copy of the GNU Library General Public
-License along with the GNU C Library; see the file COPYING.LIB.  If not,
-write to the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
-Boston, MA 02111-1307, USA.  */
+   You should have received a copy of the GNU Library General Public
+   License along with the GNU C Library; see the file COPYING.LIB.  If not,
+   write to the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+   Boston, MA 02111-1307, USA.  */
 
-char *strtok_r(char *s, const char *delim, char **save_ptr) {
+#ifndef strtok_r
+char* strtok_r(char *s, const char *delim, char **save_ptr) {
   char *token;
 
   if (s == NULL)
@@ -258,7 +283,6 @@ char *strtok_r(char *s, const char *delim, char **save_ptr) {
 
 /* ******************************** */
 
-
 void revertSlash(char *str, int mode) {
   int i;
 
@@ -274,7 +298,10 @@ void revertSlash(char *str, int mode) {
     }
 }
 
-inline const char* strcasestr( const char* one, const char* two ) {
+/* ******************************** */
+
+/*
+const char* strcasestr( const char* one, const char* two ) {
   const char* t = two;
   char oneLower = tolower(*one);
 
@@ -289,33 +316,68 @@ inline const char* strcasestr( const char* one, const char* two ) {
 
   return NULL;
 }
+*/
 
+const char *strcasestr(const char *haystack, const char *needle)
+{
+        int i=-1;
+        while (haystack[++i] != '\0') {
+                if (tolower(haystack[i]) == tolower(needle[0])) {
+                        int j=i, k=0, match=0;
+                        while (tolower(haystack[++j]) == tolower(needle[++k])) {
+                                match=1;
+                            // Catch case when they match at the end
+                                  //printf("j:%d, k:%d\n",j,k);
+                                if (haystack[j] == '\0' && needle[k] == '\0') {
+                                  //printf("Mj:%d, k:%d\n",j,k);
+                                        return &haystack[i];
+                                }
+                        }
+                        // Catch normal case
+                        if (match && needle[k] == '\0'){
+                                 // printf("Norm j:%d, k:%d\n",j,k);
+                                return &haystack[i];
+                        }
+                }
+        }
+        return NULL;
+}
+
+/* ******************************** */
 
 char* printAvailableInterfaces(char *name_or_index) {
   char ebuf[PCAP_ERRBUF_SIZE];
-  char *tmpDev = pcap_lookupdev(ebuf), *ifName;
+  char *captureDev, *ifName;
   int ifIdx=0, defaultIdx = -1, numInterfaces = 0;
   uint i, list_devices;
   char intNames[32][256], intDescr[32][256];
   int index;
 
-  if(tmpDev == NULL) {
+  captureDev = pcap_lookupdev(ebuf);
+
+  if(captureDev == NULL) {
     traceEvent(TRACE_INFO, "Unable to locate default interface (%s)", ebuf);
     exit(-1);
   }
 
-  ifName = tmpDev;
+  /* Check if this is a filename and it exists */
+  if(name_or_index != NULL) {
+	  if(access(name_or_index, F_OK) == 0)
+		return(name_or_index);
+  }
+
+  ifName = captureDev;
 
   if((name_or_index != NULL) && (atoi(name_or_index) == -1))
-	list_devices = 1;
+    list_devices = 1;
   else
-	list_devices = 0;
+    list_devices = 0;
 
   if(list_devices) printf("\n\nAvailable interfaces:\n");
 
   if(!isWinNT()) {
     for(i=0;; i++) {
-      if(tmpDev[i] == 0) {
+      if(captureDev[i] == 0) {
 	if(ifName[0] == '\0')
 	  break;
 	else {
@@ -326,73 +388,73 @@ char* printAvailableInterfaces(char *name_or_index) {
 
 	  if(ifIdx < 32) {
 	    strcpy(intNames[ifIdx], ifName);
-		strcpy(intDescr[ifIdx], ifName);
+	    strcpy(intDescr[ifIdx], ifName);
 	    if(list_devices) {
 	      if(strncmp(intNames[ifIdx], "PPP", 3) /* Avoid to use the PPP interface */
-			 && strncmp(intNames[ifIdx], "ICSHARE", 6)
-			 && (!strcasestr(intNames[ifIdx], "dialup"))
-			 ) {
+		 && strncmp(intNames[ifIdx], "ICSHARE", 6)
+		 && (!strcasestr(intNames[ifIdx], "dialup"))
+		 ) {
 		/* Avoid to use the internet sharing interface */
 		defaultIdx = ifIdx;
 	      }
 	    }
 	  }
 	  ifIdx++;
-	  ifName = &tmpDev[i+1];
+	  ifName = &captureDev[i+1];
 	}
       }
     }
 
-    tmpDev = intNames[defaultIdx];
+    captureDev = intNames[defaultIdx];
   } else {
     /* WinNT/2K */
     static char tmpString[128];
     int j,ifDescrPos = 0;
-	uint i;
+    int i;
     unsigned short *ifName; /* UNICODE */
     char *ifDescr;
 
-    ifName = (unsigned short *)tmpDev;
+    ifName = (unsigned short *)captureDev;
 
     while(*(ifName+ifDescrPos) || *(ifName+ifDescrPos-1))
       ifDescrPos++;
     ifDescrPos++;	/* Step over the extra '\0' */
     ifDescr = (char*)(ifName + ifDescrPos); /* cast *after* addition */
 
-    while(tmpDev[0] != '\0') {
-		u_char skipInterface;
+    while(captureDev[0] != '\0') {
+      u_char skipInterface;
 
-      for(j=0, i=0; !((tmpDev[i] == 0) && (tmpDev[i+1] == 0)); i++) {
-	if(tmpDev[i] != 0)
-	  tmpString[j++] = tmpDev[i];
+      for(j=0, i=0; !((captureDev[i] == 0) && (captureDev[i+1] == 0)); i++) {
+	if(captureDev[i] != 0)
+	  tmpString[j++] = captureDev[i];
       }
 
       tmpString[j++] = 0;
 
-  	  if(strstr(ifDescr, "NdisWan") || strstr(ifDescr, "dialup"))
-		skipInterface = 1;
-	  else
-		skipInterface = 0;
+      if(strstr(ifDescr, "NdisWan") || strstr(ifDescr, "dialup"))
+	skipInterface = 1;
+      else
+	skipInterface = 0;
 
       if(list_devices) {
-		  if(!skipInterface) {
-			printf("\t[index=%d] '%s'\n", ifIdx, ifDescr);
-	     	numInterfaces++;
-	     }
+	if(!skipInterface) {
+	  printf("\t[index=%d] '%s'\n", ifIdx, ifDescr);
+	  numInterfaces++;
+	}
       }
 
-      tmpDev = &tmpDev[i+3];
-       if(!skipInterface) {
-			strcpy(intNames[ifIdx], tmpString);
-			strcpy(intDescr[ifIdx], ifDescr);
-			if(defaultIdx == -1) defaultIdx = ifIdx;
-			ifIdx++;
-	   }
-		ifDescr += strlen(ifDescr)+1;
-	}
+      captureDev = &captureDev[i+3];
+      if(!skipInterface) {
+	strcpy(intNames[ifIdx], tmpString);
+	strcpy(intDescr[ifIdx], ifDescr);
+	if(defaultIdx == -1) defaultIdx = ifIdx;
+	ifIdx++;
+      }
+      ifDescr += strlen(ifDescr)+1;
+    }
 
     if(!list_devices)
-      tmpDev = intNames[defaultIdx]; /* Default */
+      captureDev = intNames[defaultIdx]; /* Default */
   }
 
   if(list_devices) {
@@ -403,15 +465,15 @@ char* printAvailableInterfaces(char *name_or_index) {
     }
     return(NULL);
   }
-  
+
   /* Return the first available device */
   if(name_or_index == NULL) return(strdup(intNames[defaultIdx]));
 
   /* Search the interface by name */
   for(i=0; i<ifIdx; i++) {
-	  if(strcasestr(intDescr[i], name_or_index) != NULL) {
-		return(strdup(intNames[i]));
-	  }
+    if(strcasestr(intDescr[i], name_or_index) != NULL) {
+      return(strdup(intNames[i]));
+    }
   }
 
   index = atoi(name_or_index);
@@ -438,36 +500,36 @@ char* printAvailableInterfaces(char *name_or_index) {
 
 static const char* inet_ntop_v4 (const void *src, char *dst, size_t size)
 {
-    const char digits[] = "0123456789";
-    int i;
-    struct in_addr *addr = (struct in_addr *)src;
-    u_long a = ntohl(addr->s_addr);
-    const char *orig_dst = dst;
+  const char digits[] = "0123456789";
+  int i;
+  struct in_addr *addr = (struct in_addr *)src;
+  u_long a = ntohl(addr->s_addr);
+  const char *orig_dst = dst;
 
-    if (size < INET_ADDRSTRLEN) {
-	errno = ENOSPC;
-	return NULL;
-    }
-    for (i = 0; i < 4; ++i) {
-	int n = (a >> (24 - i * 8)) & 0xFF;
-	int non_zerop = 0;
+  if (size < INET_ADDRSTRLEN) {
+    errno = ENOSPC;
+    return NULL;
+  }
+  for (i = 0; i < 4; ++i) {
+    int n = (a >> (24 - i * 8)) & 0xFF;
+    int non_zerop = 0;
 
-	if (non_zerop || n / 100 > 0) {
-	    *dst++ = digits[n / 100];
-	    n %= 100;
-	    non_zerop = 1;
-	}
-	if (non_zerop || n / 10 > 0) {
-	    *dst++ = digits[n / 10];
-	    n %= 10;
-	    non_zerop = 1;
-	}
-	*dst++ = digits[n];
-	if (i != 3)
-	    *dst++ = '.';
+    if (non_zerop || n / 100 > 0) {
+      *dst++ = digits[n / 100];
+      n %= 100;
+      non_zerop = 1;
     }
-    *dst++ = '\0';
-    return orig_dst;
+    if (non_zerop || n / 10 > 0) {
+      *dst++ = digits[n / 10];
+      n %= 10;
+      non_zerop = 1;
+    }
+    *dst++ = digits[n];
+    if (i != 3)
+      *dst++ = '.';
+  }
+  *dst++ = '\0';
+  return orig_dst;
 }
 
 /*
@@ -497,78 +559,78 @@ static const char* inet_ntop_v6 (const u_char *src, char *dst, size_t size)
    */
   memset (words, 0, sizeof(words));
   for (i = 0; i < IN6ADDRSZ; i++)
-      words[i/2] |= (src[i] << ((1 - (i % 2)) << 3));
+    words[i/2] |= (src[i] << ((1 - (i % 2)) << 3));
 
   best.base = -1;
   cur.base  = -1;
   for (i = 0; i < (IN6ADDRSZ / INT16SZ); i++)
-  {
-    if (words[i] == 0)
     {
-      if (cur.base == -1)
-           cur.base = i, cur.len = 1;
-      else cur.len++;
+      if (words[i] == 0)
+	{
+	  if (cur.base == -1)
+	    cur.base = i, cur.len = 1;
+	  else cur.len++;
+	}
+      else if (cur.base != -1)
+	{
+	  if (best.base == -1 || cur.len > best.len)
+	    best = cur;
+	  cur.base = -1;
+	}
     }
-    else if (cur.base != -1)
-    {
-      if (best.base == -1 || cur.len > best.len)
-         best = cur;
-      cur.base = -1;
-    }
-  }
   if ((cur.base != -1) && (best.base == -1 || cur.len > best.len))
-     best = cur;
+    best = cur;
   if (best.base != -1 && best.len < 2)
-     best.base = -1;
+    best.base = -1;
 
   /* Format the result.
    */
   tp = tmp;
   for (i = 0; i < (IN6ADDRSZ / INT16SZ); i++)
-  {
-    /* Are we inside the best run of 0x00's?
-     */
-    if (best.base != -1 && i >= best.base && i < (best.base + best.len))
     {
-      if (i == best.base)
-         *tp++ = ':';
-      continue;
-    }
+      /* Are we inside the best run of 0x00's?
+       */
+      if (best.base != -1 && i >= best.base && i < (best.base + best.len))
+	{
+	  if (i == best.base)
+	    *tp++ = ':';
+	  continue;
+	}
 
-    /* Are we following an initial run of 0x00s or any real hex?
-     */
-    if (i != 0)
-       *tp++ = ':';
+      /* Are we following an initial run of 0x00s or any real hex?
+       */
+      if (i != 0)
+	*tp++ = ':';
 
-    /* Is this address an encapsulated IPv4?
-     */
-    if (i == 6 && best.base == 0 &&
-        (best.len == 6 || (best.len == 5 && words[5] == 0xffff)))
-    {
-      if (!inet_ntop_v4(src+12, tp, sizeof(tmp) - (tp - tmp)))
-      {
-        errno = ENOSPC;
-        return (NULL);
-      }
-      tp += strlen(tp);
-      break;
+      /* Is this address an encapsulated IPv4?
+       */
+      if (i == 6 && best.base == 0 &&
+	  (best.len == 6 || (best.len == 5 && words[5] == 0xffff)))
+	{
+	  if (!inet_ntop_v4(src+12, tp, sizeof(tmp) - (tp - tmp)))
+	    {
+	      errno = ENOSPC;
+	      return (NULL);
+	    }
+	  tp += strlen(tp);
+	  break;
+	}
+      tp += sprintf (tp, "%lX", words[i]);
     }
-    tp += sprintf (tp, "%lX", words[i]);
-  }
 
   /* Was it a trailing run of 0x00's?
    */
   if (best.base != -1 && (best.base + best.len) == (IN6ADDRSZ / INT16SZ))
-     *tp++ = ':';
+    *tp++ = ':';
   *tp++ = '\0';
 
   /* Check for overflow, copy, and we're done.
    */
   if ((size_t)(tp - tmp) > size)
-  {
-    errno = ENOSPC;
-    return (NULL);
-  }
+    {
+      errno = ENOSPC;
+      return (NULL);
+    }
   return strcpy (dst, tmp);
   return (NULL);
 }
@@ -577,17 +639,27 @@ static const char* inet_ntop_v6 (const u_char *src, char *dst, size_t size)
 PCSTR
 WSAAPI
 inet_ntop(
-    __in                                INT             af,
-    __in                                PVOID           src,
-    __out_ecount(StringBufSize)         PSTR            dst,
-    __in                                size_t          size
-    ){    switch (af) {
-    case AF_INET :
-		return inet_ntop_v4 (src, dst, size);
-	case AF_INET6:
-         return inet_ntop_v6 ((const u_char*)src, dst, size);
-    default :
-		errno = WSAEAFNOSUPPORT;
-		return NULL;
-    }
+	  __in                                INT             af,
+	  __in                                PVOID           src,
+	  __out_ecount(StringBufSize)         PSTR            dst,
+	  __in                                size_t          size
+	  ){    switch (af) {
+  case AF_INET :
+    return inet_ntop_v4 (src, dst, size);
+  case AF_INET6:
+    return inet_ntop_v6 ((const u_char*)src, dst, size);
+  default :
+    errno = WSAEAFNOSUPPORT;
+    return NULL;
+  }
+}
+
+/* *********************************************************** */
+
+int nprobe_inet_pton(int af, const char *src, void *dst) {
+  if(af != AF_INET) {
+    errno = EAFNOSUPPORT;
+    return -1;
+  } else 
+    return inet_aton(src, dst);
 }

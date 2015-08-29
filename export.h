@@ -1,7 +1,7 @@
 /* 
  *        nProbe - a Netflow v5/v9/IPFIX probe for IPv4/v6 
  *
- *       Copyright (C) 2002-2010 Luca Deri <deri@ntop.org> 
+ *       Copyright (C) 2002-14 Luca Deri <deri@ntop.org> 
  *
  *                     http://www.ntop.org/ 
  * 
@@ -23,8 +23,12 @@
 #ifndef _EXPORT_H_
 #define _EXPORT_H_
 
-extern int exportBucketToNetflow(FlowHashBucket *myBucket, FlowDirection direction,
-				 u_char free_memory /* Ignored */);
+#ifdef HAVE_VOIP_EXTENSIONS
+#include "plugins/hep.h"
+#endif
+
+extern int exportBucketToNetflow(FlowHashBucket *myBucket, FlowDirection direction);
+extern void setBucketExpired(FlowHashBucket *myBucket);
 extern void checkNetFlowExport(int forceExport);
 
 extern void sendNetFlow(void *buffer, u_int32_t bufferLength,
@@ -33,9 +37,18 @@ extern void sendNetFlow(void *buffer, u_int32_t bufferLength,
 extern void sendNetFlowV5(NetFlow5Record *theV5Flow, u_char lastFlow);
 extern void sendNetFlowV9V10(u_char lastFlow, u_char sendTemplate,
 			     u_char sendOnlyTheTemplate);
+extern void setServerName(FlowHashBucket *bkt, char *name);
+extern void mapServerName(FlowHashBucket *bkt);
+extern void teid2user(FlowHashBucket *bkt, u_int32_t teid);
+extern void mapTrafficToUser(FlowHashBucket *bkt);
 extern void initNetFlowV5Header(NetFlow5Record *theV5Flow);
 extern void initNetFlowV9Header(V9FlowHeader *v9Header);
 extern void initIPFIXHeader(IPFIXFlowHeader *v10Header);
 extern int is_locked_send(void);
+
+extern int set_tcp_client_address(char *host_and_port, struct sockaddr_in *servaddr);
+extern void close_socket(int sock);
+extern int connect_to_server(struct sockaddr *servaddr);
+extern int send_tcp(int sock, char *msg, u_int msg_len);
 
 #endif /* _EXPORT_H_ */

@@ -415,9 +415,7 @@ LPTSTR GetLastErrorText( LPTSTR lpszBuf, DWORD dwSize )
   DWORD dwRet;
   LPTSTR lpszTemp = NULL;
 
-
-
-  dwRet = FormatMessage( FORMAT_MESSAGE_ALLOCATE_BUFFER |
+   dwRet = FormatMessage( FORMAT_MESSAGE_ALLOCATE_BUFFER |
 			 FORMAT_MESSAGE_FROM_SYSTEM |FORMAT_MESSAGE_ARGUMENT_ARRAY,
 			 NULL,
 			 GetLastError(),
@@ -455,20 +453,22 @@ void installService(char *service_name, int argc, char **argv)
   TCHAR szAppParameters[8192];
   SERVICE_DESCRIPTION sdBuf;
   char szParamKey[1025], szParamKey2[1025];
+  LPWSTR ptr;
 
 #if 0
   thisIsAservice = 1; bConsole = 0;
   if(argc >=1) traceEvent(TRACE_ERROR, "argv[1] = %s", argv[1]);
   if(argc >=2) traceEvent(TRACE_ERROR, "argv[2] = %s", argv[2]);
-  if(argc >=3) traceEvent(TRACE_ERROR, "argv[3] = %s", argv[3]);
+  if (argc >= 3) traceEvent(TRACE_ERROR, "argv[3] = %s", argv[3]);
 #endif
+
+  AddToMessageLog(service_name);
 
   sprintf(szParamKey, "SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", service_name);
 
   // Get the full path and filename of this program
   if ( GetModuleFileName( NULL, szPath, 512 ) == 0 ){
-    _tprintf(TEXT("Unable to install %s - %s\n"), TEXT(service_name),
-	     GetLastErrorText(szErr, 256));
+	  _tprintf(TEXT("Unable to install %s - %s\n"), service_name, GetLastErrorText(szErr, 256));
     return;
   }
 
@@ -478,8 +478,8 @@ void installService(char *service_name, int argc, char **argv)
   if ( schSCManager ) {
 
     schService = CreateService(schSCManager,   // SCManager database
-			       TEXT(service_name),        // name of service
-			       TEXT(service_name), // name to display
+		service_name,        // name of service
+				   service_name, // name to display
 			       SERVICE_ALL_ACCESS,         // desired access
 			       SERVICE_WIN32_OWN_PROCESS,  // service type
 			       SERVICESTARTTYPE,           // start type
@@ -492,7 +492,7 @@ void installService(char *service_name, int argc, char **argv)
 			       NULL);                      // no password
 
     if (schService){
-      _tprintf(TEXT("%s installed.\n"), TEXT(service_name) );
+		_tprintf(TEXT("%s installed.\n"), service_name);
 
       //Create an argument string from the argument list
       // J. R. Duarte: modified it to store the full command line
@@ -591,15 +591,14 @@ void removeService(char *service_name)
 			       NULL,
 			       SC_MANAGER_ALL_ACCESS);
   if (schSCManager){
-
     // Next get the handle to this service...
-    schService = OpenService(schSCManager, TEXT(service_name), SERVICE_ALL_ACCESS);
+	  schService = OpenService(schSCManager, service_name, SERVICE_ALL_ACCESS);
 
     if (schService){
       // Now, try to stop the service by passing a STOP code thru the control manager
       if (ControlService( schService, SERVICE_CONTROL_STOP, &ssStatus)){
 
-	_tprintf(TEXT("Stopping %s."), TEXT(service_name));
+		  _tprintf(TEXT("Stopping %s."), service_name);
 	// Wait a second...
 	Sleep( 1000 );
 
@@ -615,14 +614,14 @@ void removeService(char *service_name)
 	}
 
 	if ( ssStatus.dwCurrentState == SERVICE_STOPPED )
-	  _tprintf(TEXT("\n%s stopped.\n"), TEXT(service_name) );
+		_tprintf(TEXT("\n%s stopped.\n"), service_name);
 	else
-	  _tprintf(TEXT("\n%s failed to stop.\n"), TEXT(service_name) );
+		_tprintf(TEXT("\n%s failed to stop.\n"), service_name);
       }
 
       // Now try to remove the service...
       if(DeleteService(schService)){
-	_tprintf(TEXT("%s removed.\n"), TEXT(service_name) );
+		  _tprintf(TEXT("%s removed.\n"), service_name);
 
 	// Delete our eventlog registry key
 	sprintf(szParamKey2, "SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\%s", service_name);
@@ -686,7 +685,14 @@ void* invokenProbe(void* _szAppParameters) {
       dwNewArgc--;
     }
 
-       
+  /* Example: C:\ntop\nprobe\Release\nprobe.exe */
+  GetModuleFileName(GetModuleHandle(NULL), readOnlyGlobals.base_installation_path, MAX_PATH);
+
+  for(i = strlen(readOnlyGlobals.base_installation_path)-1; i>0; i--)
+    if(readOnlyGlobals.base_installation_path[i] == '\\') {
+      readOnlyGlobals.base_installation_path[i+1] = '\0';
+      break;
+    }
 
   nprobe_main(dwNewArgc, lpszNewArgv);
   SetEvent(hServerStopEvent); // Signal main thread that we're leaving
@@ -739,11 +745,14 @@ VOID ServiceStart (DWORD dwArgc, LPTSTR *lpszArgv)
     _tprintf(TEXT("Could not create AppParameters string.\n"));
   }
 
+  AddToMessageLog(TEXT("About to start nProbe"));
   pthread_create(&nProbeThread, NULL, invokenProbe, (void*)strdup(szAppParameters));
+  AddToMessageLog(TEXT("nProbe started"));
 
   // Wait for the stop event to be signalled.
   WaitForSingleObject(hServerStopEvent,INFINITE);
-   
+  AddToMessageLog(TEXT("nProbe terminated"));
+
  cleanup:
   if (hServerStopEvent)
     CloseHandle(hServerStopEvent);
@@ -984,7 +993,7 @@ void main(int argc, char **argv)
 
   TCHAR szAppParameters[8192];
 
-  pthread_win32_process_attach_np();
+ // pthread_win32_process_attach_np();
 
   if(!isWinNT()) {
     convertArgListToArgString((LPTSTR) szAppParameters,0, argc, argv);
